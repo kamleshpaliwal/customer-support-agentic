@@ -1,0 +1,56 @@
+# Local environment variables and credentials.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python bytecode and caches.
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+
+# Virtual environments.
+.venv/
+venv/
+env/
+ENV/
+
+# Build and package artifacts.
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Linters, type checkers, tests, and coverage output.
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local logs and database files/backups.
+*.log
+logs/
+*.sqlite
+*.sqlite3
+*.db
+*.dump
+*.backup
+
+# Local seed data that may contain real customer fees.
+/data/fees_seed.csv
+
+# Editors and operating-system metadata.
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Notebook checkpoints.
+.ipynb_checkpoints/

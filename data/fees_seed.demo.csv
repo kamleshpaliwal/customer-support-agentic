@@ -1,0 +1,21 @@
+board,standard,academic_year,fee_type,amount,currency,billing_frequency
+DEMO-CBSE,Class 1,2026-2027,tuition,42000.00,INR,annual
+DEMO-CBSE,Class 1,2026-2027,learning_resources,8000.00,INR,annual
+DEMO-CBSE,Class 5,2026-2027,tuition,52000.00,INR,annual
+DEMO-CBSE,Class 5,2026-2027,learning_resources,9500.00,INR,annual
+DEMO-CBSE,Class 8,2026-2027,tuition,64000.00,INR,annual
+DEMO-CBSE,Class 8,2026-2027,learning_resources,12000.00,INR,annual
+DEMO-CBSE,Class 10,2026-2027,tuition,72000.00,INR,annual
+DEMO-CBSE,Class 10,2026-2027,learning_resources,14500.00,INR,annual
+DEMO-CBSE,Class 12,2026-2027,tuition,84000.00,INR,annual
+DEMO-CBSE,Class 12,2026-2027,learning_resources,18000.00,INR,annual
+DEMO-ICSE,Class 1,2026-2027,tuition,46000.00,INR,annual
+DEMO-ICSE,Class 1,2026-2027,learning_resources,9000.00,INR,annual
+DEMO-ICSE,Class 5,2026-2027,tuition,57000.00,INR,annual
+DEMO-ICSE,Class 5,2026-2027,learning_resources,10500.00,INR,annual
+DEMO-ICSE,Class 8,2026-2027,tuition,69000.00,INR,annual
+DEMO-ICSE,Class 8,2026-2027,learning_resources,13500.00,INR,annual
+DEMO-ICSE,Class 10,2026-2027,tuition,78000.00,INR,annual
+DEMO-ICSE,Class 10,2026-2027,learning_resources,16000.00,INR,annual
+DEMO-ICSE,Class 12,2026-2027,tuition,92000.00,INR,annual
+DEMO-ICSE,Class 12,2026-2027,learning_resources,19500.00,INR,annual
