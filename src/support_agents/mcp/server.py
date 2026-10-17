@@ -4,12 +4,19 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Annotated, cast
+import re
+from typing import Annotated, Literal, cast
 
 import asyncpg
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
-from pydantic import Field
+from mcp.server.mcpserver import (
+    AcceptedElicitation,
+    Elicit,
+    ElicitationResult,
+    Resolve,
+)
+from pydantic import BaseModel, Field
 
 from support_agents.db.connection import create_pool
 from support_agents.embeddings import OllamaEmbedder, to_pgvector
@@ -20,6 +27,35 @@ from support_agents.schemas import (
     FeeLookupResult,
 )
 from support_agents.settings import get_settings
+
+_NUMERIC_STANDARD = re.compile(
+    r"(?:(?:class|standard|grade)\s*)?(\d{1,2})", re.IGNORECASE
+)
+_BOOK_LANGUAGE = re.compile(r"\b(english|hindi)\b", re.IGNORECASE)
+
+
+class BookLanguageChoice(BaseModel):
+    language: Literal["English", "Hindi"] = Field(
+        description="Language for the requested book recommendations."
+    )
+
+
+def resolve_book_language(
+    query: str, document_type: str
+) -> BookLanguageChoice | Elicit[BookLanguageChoice]:
+    """Ask the user which supported language they want for book recommendations."""
+    if document_type != "book_recommendations":
+        return BookLanguageChoice(language="English")
+
+    mentioned = {match.title() for match in _BOOK_LANGUAGE.findall(query)}
+    if len(mentioned) == 1:
+        return BookLanguageChoice(language=next(iter(mentioned)))
+
+    return Elicit(
+        "Which language should I use for the book recommendations? Choose English or Hindi.",
+        BookLanguageChoice,
+    )
+
 
 @dataclass
 class AppContext:
@@ -64,6 +100,9 @@ async def get_fees(
 
     normalized_board = board.strip()
     normalized_standard = standard.strip()
+    standard_match = _NUMERIC_STANDARD.fullmatch(normalized_standard)
+    if standard_match:
+        normalized_standard = f"Class {int(standard_match.group(1))}"
     if not normalized_board or not normalized_standard:
         return FeeLookupResult(
             found=False,
@@ -108,6 +147,31 @@ async def get_fees(
     )
 
     if not rows:
+        candidate_rows = await pool.fetch(
+            """
+            SELECT DISTINCT board
+            FROM fees
+            WHERE lower(standard) = lower($2)
+              AND academic_year = $3
+              AND (
+                    strpos(lower(board), lower($1)) > 0
+                    OR strpos(lower($1), lower(board)) > 0
+              )
+            ORDER BY board
+            LIMIT 5
+            """,
+            normalized_board,
+            normalized_standard,
+            academic_year,
+            timeout=10,
+        )
+        board_candidates = [row["board"] for row in candidate_rows]
+        message = "No fee record was found for the requested board, standard, and academic year."
+        if board_candidates:
+            message = (
+                "No exact board match was found. Similar board records are available; "
+                "ask the user to confirm a candidate before looking it up."
+            )
         return FeeLookupResult(
             found=False,
             board=normalized_board,
@@ -117,7 +181,8 @@ async def get_fees(
             total_amount=None,
             currency=None,
             billing_frequency=None,
-            message="No fee record was found for the requested board, standard, and academic year.",
+            message=message,
+            board_candidates=board_candidates,
         )
 
     currencies = {row["currency"].strip() for row in rows}
@@ -169,30 +234,54 @@ async def search_academic_documents(
         Field(min_length=1, max_length=2000, description="Academic question to search for"),
     ],
     ctx: Context,
+    language: Annotated[
+        ElicitationResult[BookLanguageChoice], Resolve(resolve_book_language)
+    ],
     limit: Annotated[int, Field(ge=1, le=10, description="Maximum number of relevant passages")] = 4,
+    document_type: Annotated[
+        Literal["syllabus", "book_recommendations"],
+        Field(description="Academic source type to search."),
+    ] = "syllabus",
 ) -> AcademicSearchResult:
-    """Find relevant passages from the ingested academic subject guide."""
+    """Find relevant passages from the selected ingested academic source."""
+    if document_type == "book_recommendations":
+        if not isinstance(language, AcceptedElicitation):
+            return AcademicSearchResult(
+                matches=[],
+                message="The user cancelled the book-language question.",
+                elicitation_cancelled=True,
+            )
+        selected_language = language.data.language
+    else:
+        selected_language = None
+
     normalized_query = query.strip()
     if not normalized_query:
         return AcademicSearchResult(matches=[], message="Search query must not be blank.")
 
     settings = get_settings()
     app_context = cast(AppContext, ctx.request_context.lifespan_context)
-    vector = to_pgvector(await app_context.embedder.embed(normalized_query))
+    search_query = normalized_query
+    if selected_language:
+        search_query = f"{normalized_query}\nRequested book language: {selected_language}."
+    vector = to_pgvector(await app_context.embedder.embed(search_query))
     rows = await app_context.pool.fetch(
         """
         SELECT content,
                metadata->>'source_title' AS source,
                NULLIF(metadata->>'page', '')::INTEGER AS page,
                metadata->>'standard' AS standard,
+               metadata->>'subject' AS subject,
                1 - (embedding <=> $1::text::vector) AS similarity_score
         FROM academic_documents
         WHERE embedding_model = $2
+          AND COALESCE(metadata->>'document_type', 'syllabus') = $3
         ORDER BY embedding <=> $1::text::vector
-        LIMIT $3
+        LIMIT $4
         """,
         vector,
         app_context.embedder.model,
+        document_type,
         limit,
         timeout=10,
     )
@@ -202,6 +291,7 @@ async def search_academic_documents(
             source=row["source"] or "Academic subject guide",
             page=row["page"],
             standard=row["standard"],
+            subject=row["subject"],
             similarity_score=min(1.0, max(-1.0, float(row["similarity_score"]))),
         )
         for row in rows
@@ -212,7 +302,11 @@ async def search_academic_documents(
         if matches
         else "No sufficiently relevant academic passage was found in the indexed guide."
     )
-    return AcademicSearchResult(matches=matches, message=message)
+    return AcademicSearchResult(
+        matches=matches,
+        message=message,
+        language=selected_language,
+    )
 
 
 if __name__ == "__main__":

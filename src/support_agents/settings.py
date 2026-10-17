@@ -16,9 +16,16 @@ class Settings(BaseSettings):
     ollama_request_timeout_seconds: int = Field(default=300, ge=1, le=3600)
     ollama_embedding_model: str = "nomic-embed-text"
     academic_document_path: Path = PROJECT_ROOT / "data" / "academic" / "subjects_standards_1_to_10.pdf"
+    academic_book_recommendations_document_path: Path = (
+        PROJECT_ROOT
+        / "data"
+        / "academic"
+        / "ncert_book_recommendations_standards_1_to_10_2026-27.pdf"
+    )
     academic_ingest_api_key: str | None = None
     academic_search_top_k: int = Field(default=4, ge=1, le=10)
     academic_search_min_similarity: float = Field(default=0.30, ge=-1.0, le=1.0)
+    academic_agent_ollama_model: str = "qwen3:4b-instruct"
     aws_region: str = "us-east-1"
     supervisor_provider: Literal["ollama", "bedrock"] = "ollama"
     supervisor_ollama_model: str = "qwen3:4b-instruct"

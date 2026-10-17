@@ -36,7 +36,7 @@ src/support_agents/
 
 ## Fee database and MCP server
 
-PostgreSQL stores structured `fees` records and academic PDF passages with pgvector embeddings. The MCP server exposes `get_fees` for exact fee lookups and `search_academic_documents` for semantic search over the indexed academic guide.
+PostgreSQL stores structured `fees` records and academic PDF passages with pgvector embeddings. The MCP server exposes `get_fees` for exact fee lookups and `search_academic_documents` for semantic search over the indexed academic sources. Academic sources share one table and are separated by the `document_type` metadata value (`syllabus` or `book_recommendations`).
 
 ### Run locally
 
@@ -59,7 +59,7 @@ The Compose service uses the pgvector PostgreSQL image. Database migrations crea
 
 ### Academic RAG document
 
-The first academic knowledge source is `data/academic/subjects_standards_1_to_10.pdf`, a general CBSE-aligned overview. It is not an official school or year-specific syllabus. `ACADEMIC_DOCUMENT_PATH` in `.env` selects the PDF to ingest; relative paths are resolved from the project root. Keep the source PDF under version control only if you have the rights to distribute it with the application.
+The syllabus knowledge source is `data/academic/subjects_standards_1_to_10.pdf`, a general CBSE-aligned overview. It is not an official school or year-specific syllabus. The NCERT-first book reference is `data/academic/ncert_book_recommendations_standards_1_to_10_2026-27.pdf`; its titles and editions must be checked against the current NCERT catalogue and the school's list. `ACADEMIC_DOCUMENT_PATH` selects the syllabus PDF, and `ACADEMIC_BOOK_RECOMMENDATIONS_DOCUMENT_PATH` selects the book-reference PDF. Relative paths are resolved from the project root. Keep source PDFs under version control only if you have the rights to distribute them with the application.
 
 Pull the local embedding model once and initialize the database schema:
 
@@ -74,9 +74,25 @@ Document ingestion is an explicit API operation. Set a private `ACADEMIC_INGEST_
 curl -X POST http://127.0.0.1:5000/api/v1/academic/ingest -H 'Authorization: Bearer YOUR_CONFIGURED_INGEST_KEY'
 ```
 
-The endpoint reads the configured PDF, extracts grade-specific passages and page metadata, creates embeddings through Ollama's local `/api/embed` endpoint, and saves or replaces that source's chunks in PostgreSQL. Its response reports the file name and number of chunks indexed. Repeating the request reindexes the configured file. The academic specialist sends the user's question to the MCP `search_academic_documents` tool, which embeds the question and searches PostgreSQL by cosine distance. Retrieved passages and page references go to the final responder as evidence. The responder is instructed to stay within those passages and explain that this PDF is a general overview.
+The endpoint accepts an optional JSON `document_type`: `syllabus` (the default) or `book_recommendations`. It selects the matching server-configured path; callers cannot submit arbitrary filesystem paths. Syllabus passages are structure-chunked by standard. Book-reference pages are combined into one chunk per standard-and-subject recommendation record, with page range and document type stored in metadata. The importer creates embeddings through Ollama's local `/api/embed` endpoint and saves or replaces only the selected source's chunks in PostgreSQL. The response reports document type, file name and number of chunks indexed. Repeating the request reindexes that source. The MCP `search_academic_documents` tool accepts the same `document_type` filter and searches matching embeddings by cosine distance. A LangChain `create_agent` Academic Specialist autonomously selects the syllabus or book-recommendations MCP search tool. If the agent sees an unclear request or one outside both sources, it calls neither tool and asks the user to clarify. Retrieved passages, grade, subject and page references are passed to the final responder as evidence.
 
-Configure `OLLAMA_EMBEDDING_MODEL`, `ACADEMIC_DOCUMENT_PATH`, `ACADEMIC_INGEST_API_KEY`, `ACADEMIC_SEARCH_TOP_K`, and `ACADEMIC_SEARCH_MIN_SIMILARITY` in `.env`. The configured embedding model must return 768 dimensions to match the vector column. Use the same embedding model for ingestion and queries. If the model changes, re-embed the document and migrate the vector column before using it.
+Ingest the syllabus PDF (existing behavior):
+
+```bash
+curl -X POST http://127.0.0.1:5000/api/v1/academic/ingest \\
+  -H 'Authorization: Bearer YOUR_CONFIGURED_INGEST_KEY'
+```
+
+Ingest the book-recommendations PDF:
+
+```bash
+curl -X POST http://127.0.0.1:5000/api/v1/academic/ingest \\
+  -H 'Authorization: Bearer YOUR_CONFIGURED_INGEST_KEY' \\
+  -H 'Content-Type: application/json' \\
+  -d '{"document_type":"book_recommendations"}'
+```
+
+Configure `OLLAMA_EMBEDDING_MODEL`, `ACADEMIC_AGENT_OLLAMA_MODEL`, `ACADEMIC_DOCUMENT_PATH`, `ACADEMIC_BOOK_RECOMMENDATIONS_DOCUMENT_PATH`, `ACADEMIC_INGEST_API_KEY`, `ACADEMIC_SEARCH_TOP_K`, and `ACADEMIC_SEARCH_MIN_SIMILARITY` in `.env`. The configured embedding model must return 768 dimensions to match the vector column. Use the same embedding model for ingestion and queries. If the model changes, re-embed the documents and migrate the vector column before using them.
 
 Copy `data/fees_seed.template.csv` to a new CSV file, fill it with the school's verified fee records, and import it:
 
@@ -172,7 +188,7 @@ python -m pip install -e .
 python -m support_agents.api
 ```
 
-The local server listens at `http://127.0.0.1:5000`. Check it with `GET /health`, or submit a request:
+The local server listens at `http://127.0.0.1:5000`. Open `http://127.0.0.1:5000/` for the browser interface. Its stylesheet and JavaScript live in the project-level `static/` folder, outside the `support_agents` package. The Finance and Academic tabs provide relevant prompts and examples; each question is submitted to `/api/v1/query`, and the supervisor continues to classify and route it. Check the API with `GET /health`, or submit a request:
 
 ```bash
 curl -X POST http://127.0.0.1:5000/api/v1/query \
@@ -180,7 +196,16 @@ curl -X POST http://127.0.0.1:5000/api/v1/query \
   -d '{"query":"What is the tuition fee for CBSE class 1 in 2026-2027?"}'
 ```
 
-The `user_id` field is optional and defaults to `anonymous`. A successful response contains `request_id`, `answer`, `intent`, and `limitations`. After initializing the schema, configure the PDF path and ingestion key, then call the ingestion endpoint before asking academic questions. The built-in Flask server is for local development; use a production WSGI server and a protected network configuration for deployment.
+The `user_id` field is optional and defaults to `anonymous`. A completed response contains `request_id`, `status`, `answer`, `intent`, and `limitations`. If the supervisor needs more information, the API returns `status: "needs_input"`, a `question`, and the same `request_id`. Submit the user's reply to the resume endpoint:
+
+```bash
+REQUEST_ID='paste-the-request_id-from-the-previous-response'
+curl -X POST "http://127.0.0.1:5000/api/v1/query/${REQUEST_ID}/resume" \
+  -H 'Content-Type: application/json' \
+  -d '{"answer":"2026-2027"}'
+```
+
+The Finance board-candidate confirmation uses a LangGraph interrupt. For academic book requests that omit language, the academic MCP tool uses MCP elicitation to ask the user to choose English or Hindi; the Flask UI polls the pending elicitation endpoint while the original query request waits. The browser supplies a UUID `request_id` so the MCP client's elicitation callback can match the prompt to the browser. Direct API clients that want interactive elicitation must also provide a UUID and poll `/api/v1/elicitation/<request_id>`; submit a choice to `/api/v1/elicitation/<request_id>/answer`. The current elicitation broker is in process memory, so the query and its poll/answer requests must reach the same running process. Use shared state and request routing before deploying multiple workers. After initializing the schema, configure the PDF path and ingestion key, then call the ingestion endpoint before asking academic questions. The built-in Flask server is for local development; use a production WSGI server and a protected network configuration for deployment.
 
 Example academic request after indexing:
 

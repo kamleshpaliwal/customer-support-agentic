@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f6f7f9">
+    <title>School Support</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+    <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="School Support home">
+          <span class="brand-mark" aria-hidden="true">S</span>
+          <span>school<span class="brand-light">support</span></span>
+        </a>
+        <span class="service-status"><span class="status-dot"></span> Support assistant</span>
+      </header>
+
+      <main>
+        <section class="intro" aria-labelledby="page-title">
+          <p class="eyebrow">YOUR SCHOOL, ONE QUESTION AWAY</p>
+          <h1 id="page-title">How can we help?</h1>
+          <p class="intro-copy">Ask about fees, subjects, syllabus, or recommended books.</p>
+        </section>
+
+        <section class="workspace" aria-label="Ask a support question">
+          <div class="tab-list" role="tablist" aria-label="Support topic">
+            <button class="tab-button is-active" id="finance-tab" type="button" role="tab"
+                    aria-selected="true" aria-controls="query-panel" data-topic="finance">
+              <span class="tab-icon" aria-hidden="true">₹</span>
+              Finance
+            </button>
+            <button class="tab-button" id="academic-tab" type="button" role="tab"
+                    aria-selected="false" aria-controls="query-panel" data-topic="academic" tabindex="-1">
+              <span class="tab-icon academic-icon" aria-hidden="true">✳</span>
+              Academic
+            </button>
+          </div>
+
+          <div class="panel" id="query-panel" role="tabpanel" aria-labelledby="finance-tab">
+            <div class="panel-heading">
+              <div>
+                <p class="panel-kicker" id="topic-kicker">FEE SUPPORT</p>
+                <h2 id="topic-title">What would you like to know?</h2>
+              </div>
+              <span class="private-note"><span aria-hidden="true">✦</span> Ask in your own words</span>
+            </div>
+
+            <form id="query-form">
+              <label class="sr-only" for="query-input">Your question</label>
+              <textarea id="query-input" name="query" maxlength="20000" required
+                        placeholder="For example: What is the tuition fee for DEMO-CBSE Class 1 in 2026-2027?"
+                        rows="4"></textarea>
+              <div class="form-footer">
+                <span class="helper-text" id="helper-text">Include the board, class, and academic year for fee questions.</span>
+                <button class="send-button" id="send-button" type="submit">
+                  <span id="send-label">Ask question</span>
+                  <svg aria-hidden="true" viewBox="0 0 20 20" fill="none">
+                    <path d="M4 10h11m-4-4 4 4-4 4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                </button>
+              </div>
+            </form>
+
+            <div class="suggestions-wrap">
+              <span class="suggestions-label">TRY ASKING</span>
+              <div class="suggestions" id="suggestions">
+                <button class="suggestion" type="button">Tuition fee for Class 1, 2026-2027</button>
+                <button class="suggestion" type="button">What fees are charged annually?</button>
+                <button class="suggestion" type="button">Fee for DEMO-CBSE Class 5</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="response-card" id="response-card" aria-live="polite" hidden>
+            <div class="response-topline">
+              <div class="response-label"><span class="response-spark" aria-hidden="true">✦</span> RESPONSE</div>
+              <span class="intent-badge" id="intent-badge"></span>
+            </div>
+            <p class="response-answer" id="response-answer"></p>
+            <ul class="limitations" id="limitations" hidden></ul>
+            <form class="clarification-form" id="clarification-form" hidden>
+              <label for="clarification-input">Your response</label>
+              <div class="clarification-options" id="clarification-options"></div>
+              <div class="clarification-controls">
+                <input id="clarification-input" name="answer" maxlength="2000" required
+                       autocomplete="off" placeholder="Type your answer">
+                <button class="send-button" id="clarification-submit" type="submit">
+                  <span id="clarification-label">Send answer</span>
+                  <svg aria-hidden="true" viewBox="0 0 20 20" fill="none">
+                    <path d="M4 10h11m-4-4 4 4-4 4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                </button>
+              </div>
+            </form>
+            <p class="request-reference" id="request-reference"></p>
+          </div>
+
+          <p class="routing-note"><span class="routing-icon" aria-hidden="true">↗</span>
+            Your question is checked and routed to the relevant support specialist.
+          </p>
+        </section>
+      </main>
+
+      <footer class="footer"><span>School Support</span><span>Answers grounded in your school's available information</span></footer>
+    </div>
+  </body>
+</html>

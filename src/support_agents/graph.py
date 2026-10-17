@@ -9,7 +9,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, TypedDict
 
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
 
 from support_agents.schemas import FeeLookupRequest, Intent, IntentDecision, SpecialistResult
 
@@ -25,6 +27,7 @@ class Specialist(Protocol):
         *,
         user_id: str,
         fee_lookup: FeeLookupRequest | None = None,
+        request_id: str | None = None,
     ) -> SpecialistResult: ...
 
 
@@ -42,10 +45,13 @@ class GraphDependencies:
 
 class SupportState(TypedDict, total=False):
     request_id: str
+    allow_mcp_elicitation: bool
     user_id: str
     query: str
     intent: Intent
     clarification_question: str | None
+    clarification_mode: str | None
+    clarification_options: list[str]
     fee_lookup: FeeLookupRequest | None
     specialist_result: SpecialistResult
     answer: str
@@ -68,23 +74,109 @@ def build_support_graph(dependencies: GraphDependencies):
             state["query"],
             user_id=state["user_id"],
             fee_lookup=state.get("fee_lookup"),
+            request_id=state.get("request_id"),
         )
-        return {"specialist_result": result}
+        update: dict[str, object] = {
+            "specialist_result": result,
+            "clarification_question": None,
+            "clarification_mode": None,
+            "clarification_options": [],
+        }
+        if result.needs_follow_up and result.follow_up_options:
+            update.update(
+                {
+                    "clarification_question": result.answer,
+                    "clarification_mode": "fee_board_selection",
+                    "clarification_options": result.follow_up_options,
+                }
+            )
+        return update
 
     async def academic(state: SupportState) -> dict[str, object]:
         result = await dependencies.academic_specialist.respond(
-            state["query"], user_id=state["user_id"], fee_lookup=None
+            state["query"],
+            user_id=state["user_id"],
+            fee_lookup=None,
+            request_id=(
+                state.get("request_id")
+                if state.get("allow_mcp_elicitation", False)
+                else None
+            ),
         )
         return {"specialist_result": result}
 
-    async def clarification(state: SupportState) -> dict[str, object]:
+    async def clarification(state: SupportState) -> Command:
         question = state.get("clarification_question")
-        result = SpecialistResult(
-            specialist="supervisor",
-            answer=question or "Could you clarify whether your question is about finance or academics?",
-            needs_follow_up=True,
+        options = state.get("clarification_options", [])
+        mode = state.get("clarification_mode")
+        answer = interrupt(
+            {
+                "kind": mode or "clarification",
+                "question": question
+                or "Could you clarify whether your question is about finance or academics?",
+                "intent": state.get("intent", Intent.CLARIFICATION).value,
+                "options": options,
+            }
         )
-        return {"specialist_result": result}
+        if not isinstance(answer, str) or not answer.strip():
+            raise ValueError("A non-empty clarification answer is required to resume the graph.")
+
+        if mode == "fee_board_selection":
+            selected_board = next(
+                (option for option in options if option.casefold() == answer.strip().casefold()),
+                None,
+            )
+            if selected_board is None and len(options) == 1 and answer.strip().casefold() in {
+                "yes",
+                "y",
+                "correct",
+                "use it",
+                "use that",
+            }:
+                selected_board = options[0]
+
+            if selected_board is not None and state.get("fee_lookup") is not None:
+                updated_lookup = state["fee_lookup"].model_copy(
+                    update={"board": selected_board}
+                )
+                return Command(
+                    goto="finance",
+                    update={
+                        "fee_lookup": updated_lookup,
+                        "clarification_question": None,
+                        "clarification_mode": None,
+                        "clarification_options": [],
+                    },
+                )
+
+            result = SpecialistResult(
+                specialist="finance",
+                answer=(
+                    "Understood. I cancelled the lookup because no exact board was confirmed. "
+                    "Please submit a new question with the board name you want checked."
+                ),
+                limitations=["No fee record was queried for a similar board without confirmation."],
+            )
+            return Command(
+                goto="final_response",
+                update={
+                    "specialist_result": result,
+                    "clarification_question": None,
+                    "clarification_mode": None,
+                    "clarification_options": [],
+                },
+            )
+
+        # Re-run routing against the original question plus the user's clarification.
+        # The specialist will only be called after the required fields validate.
+        combined_query = (
+            f"Original request: {state['query']}\n"
+            f"User clarification: {answer.strip()}"
+        )
+        return Command(
+            goto="detect_intent",
+            update={"query": combined_query, "clarification_question": None},
+        )
 
     async def unsupported(_: SupportState) -> dict[str, object]:
         result = SpecialistResult(
@@ -107,6 +199,9 @@ def build_support_graph(dependencies: GraphDependencies):
             Intent.UNSUPPORTED: "unsupported",
         }[state["intent"]]
 
+    def route_after_finance(state: SupportState) -> str:
+        return "clarification" if state.get("clarification_question") else "final_response"
+
     builder = StateGraph(SupportState)
     builder.add_node("detect_intent", detect_intent)
     builder.add_node("finance", finance)
@@ -125,7 +220,14 @@ def build_support_graph(dependencies: GraphDependencies):
             "unsupported": "unsupported",
         },
     )
-    for node in ("finance", "academic", "clarification", "unsupported"):
+    builder.add_conditional_edges(
+        "finance",
+        route_after_finance,
+        {"clarification": "clarification", "final_response": "final_response"},
+    )
+    for node in ("academic", "unsupported"):
         builder.add_edge(node, "final_response")
     builder.add_edge("final_response", END)
-    return builder.compile()
+    # Keeps paused conversations resumable across HTTP requests while this process runs.
+    # Replace with a durable checkpointer (for example PostgreSQL) for multi-worker production.
+    return builder.compile(checkpointer=InMemorySaver())

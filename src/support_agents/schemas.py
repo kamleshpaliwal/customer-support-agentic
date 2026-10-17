@@ -1,6 +1,8 @@
 """Typed contracts shared by the graph, agents, and MCP adapters."""
 
+import re
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -21,6 +23,17 @@ class FeeLookupRequest(BaseModel):
     @classmethod
     def strip_lookup_text(cls, value: object) -> object:
         return value.strip() if isinstance(value, str) else value
+
+    @field_validator("standard")
+    @classmethod
+    def normalize_numeric_standard(cls, value: str) -> str:
+        """Normalize `5`, `Standard 5`, and `Grade 5` to the seeded `Class 5` form."""
+        match = re.fullmatch(
+            r"(?:(?:class|standard|grade)\s*)?(\d{1,2})", value, re.IGNORECASE
+        )
+        if match:
+            return f"Class {int(match.group(1))}"
+        return value
 
     @field_validator("academic_year")
     @classmethod
@@ -62,6 +75,7 @@ class FeeLookupResult(BaseModel):
     currency: str | None
     billing_frequency: str | None
     message: str
+    board_candidates: list[str] = Field(default_factory=list)
 
 
 class AcademicSearchMatch(BaseModel):
@@ -69,12 +83,15 @@ class AcademicSearchMatch(BaseModel):
     source: str
     page: int | None = None
     standard: str | None = None
+    subject: str | None = None
     similarity_score: float = Field(ge=-1.0, le=1.0)
 
 
 class AcademicSearchResult(BaseModel):
     matches: list[AcademicSearchMatch] = Field(default_factory=list)
     message: str
+    language: Literal["English", "Hindi"] | None = None
+    elicitation_cancelled: bool = False
 
 
 class SpecialistResult(BaseModel):
@@ -83,6 +100,7 @@ class SpecialistResult(BaseModel):
     evidence: list[Evidence] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
     needs_follow_up: bool = False
+    follow_up_options: list[str] = Field(default_factory=list)
 
 
 class SupportRequest(BaseModel):

@@ -8,8 +8,10 @@ version = "0.1.0"
 description = "LangGraph customer support system with MCP-backed specialist tools"
 requires-python = ">=3.11"
 dependencies = [
+    "langchain>=1.0,<2",
     "langgraph>=0.2,<2",
     "langchain-core>=0.3,<2",
+    "langchain-ollama>=1.0,<2",
     "pydantic>=2.7,<3",
     "pydantic-settings>=2.2,<3",
     "asyncpg>=0.29,<1",
@@ -27,6 +29,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "support_agents.db" = ["migrations/*.sql"]
+"support_agents" = ["templates/*.html"]
 
 [tool.ruff]
 line-length = 100

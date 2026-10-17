@@ -2,14 +2,17 @@
 
 import asyncio
 import sys
+from typing import Literal
 
 from mcp import Client, StdioServerParameters
+from mcp.types import ElicitRequestFormParams, ElicitResult
 
 from support_agents.schemas import (
     AcademicSearchResult,
     FeeLookupRequest,
     FeeLookupResult,
 )
+from support_agents.mcp.elicitation import elicitation_broker
 from support_agents.settings import PROJECT_ROOT, get_settings
 
 
@@ -67,7 +70,13 @@ class AcademicMCPClient:
         settings = get_settings()
         self.timeout_seconds = timeout_seconds or settings.ollama_request_timeout_seconds + 10
 
-    async def search(self, query: str) -> AcademicSearchResult:
+    async def search(
+        self,
+        query: str,
+        *,
+        document_type: Literal["syllabus", "book_recommendations"] = "syllabus",
+        request_id: str | None = None,
+    ) -> AcademicSearchResult:
         settings = get_settings()
         server = StdioServerParameters(
             command=sys.executable,
@@ -76,14 +85,36 @@ class AcademicMCPClient:
             env={"DATABASE_URL": settings.database_url, "MCP_TRANSPORT": "stdio"},
         )
 
+        async def handle_elicitation(context, params) -> ElicitResult:
+            del context
+            if request_id is None or not isinstance(params, ElicitRequestFormParams):
+                return ElicitResult(action="decline")
+
+            properties = params.requested_schema.get("properties", {})
+            field_name, field_schema = next(iter(properties.items()), (None, {}))
+            options = field_schema.get("enum", []) if isinstance(field_schema, dict) else []
+            if not field_name or not options:
+                return ElicitResult(action="decline")
+
+            return await elicitation_broker.ask(
+                request_id,
+                message=params.message,
+                field_name=field_name,
+                options=[str(option) for option in options],
+            )
+
         try:
             async with asyncio.timeout(self.timeout_seconds):
-                async with Client(server) as client:
+                async with Client(
+                    server,
+                    elicitation_callback=handle_elicitation,
+                ) as client:
                     result = await client.call_tool(
                         "search_academic_documents",
                         {
                             "query": query,
                             "limit": settings.academic_search_top_k,
+                            "document_type": document_type,
                         },
                     )
             if result.is_error:
