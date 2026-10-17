@@ -4,7 +4,7 @@ import logging
 import re
 
 from support_agents.mcp.client import FeeMCPClientError, FeesMCPClient
-from support_agents.schemas import Evidence, FeeLookupRequest, SpecialistResult
+from support_agents.schemas import Evidence, FeeLookupRequest, SpecialistResult, ToolCallRecord
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,9 @@ class FinanceSpecialist:
                 needs_follow_up=True,
             )
 
+        tool_calls = [
+            ToolCallRecord(name="get_fees", arguments=fee_lookup.model_dump())
+        ]
         try:
             result = await self.fees_client.get_fees(fee_lookup)
             # If the model shortened a board label, trust an exact candidate explicitly
@@ -51,11 +54,15 @@ class FinanceSpecialist:
                     fee_lookup = fee_lookup.model_copy(
                         update={"board": explicitly_named[0]}
                     )
+                    tool_calls.append(
+                        ToolCallRecord(name="get_fees", arguments=fee_lookup.model_dump())
+                    )
                     result = await self.fees_client.get_fees(fee_lookup)
         except FeeMCPClientError as error:
             return SpecialistResult(
                 specialist="finance",
                 answer="I could not retrieve the fee records right now.",
+                tool_calls=tool_calls,
                 limitations=[str(error)],
             )
 
@@ -76,6 +83,7 @@ class FinanceSpecialist:
                 return SpecialistResult(
                     specialist="finance",
                     answer=question,
+                    tool_calls=tool_calls,
                     needs_follow_up=True,
                     follow_up_options=result.board_candidates,
                 )
@@ -83,6 +91,7 @@ class FinanceSpecialist:
             return SpecialistResult(
                 specialist="finance",
                 answer=result.message,
+                tool_calls=tool_calls,
                 limitations=[result.message],
             )
 
@@ -115,5 +124,6 @@ class FinanceSpecialist:
                 f"academic year {result.academic_year} were found."
             ),
             evidence=evidence,
+            tool_calls=tool_calls,
             limitations=limitations,
         )

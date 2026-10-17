@@ -37,6 +37,7 @@ htmlcov/
 # Local logs and database files/backups.
 *.log
 logs/
+/outputs/evaluations/
 *.sqlite
 *.sqlite3
 *.db

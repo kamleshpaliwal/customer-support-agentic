@@ -20,7 +20,7 @@ from support_agents.agents.supervisor import create_intent_detector
 from support_agents.db.ingest_academic_pdf import ingest_configured_pdf
 from support_agents.graph import GraphDependencies, build_support_graph
 from support_agents.mcp.elicitation import elicitation_broker
-from support_agents.settings import PROJECT_ROOT, get_settings
+from support_agents.settings import PROJECT_ROOT, configure_langsmith_tracing, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +80,7 @@ class AcademicIngestPayload(BaseModel):
 def create_app(*, graph=None) -> Flask:
     """Create the Flask app, wiring the configured model and MCP adapters by default."""
 
+    configure_langsmith_tracing()
     app = Flask(__name__, static_folder=str(PROJECT_ROOT / "static"))
     support_graph = graph or build_support_graph(
         GraphDependencies(

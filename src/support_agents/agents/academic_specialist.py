@@ -18,6 +18,7 @@ from support_agents.schemas import (
     Evidence,
     FeeLookupRequest,
     SpecialistResult,
+    ToolCallRecord,
 )
 from support_agents.settings import get_settings
 
@@ -232,4 +233,19 @@ class AcademicSpecialist:
         # instruction, keep evidence tied to the first tool it actually selected.
         document_type, search_result = search_results[0]
         logger.info("Academic agent selected MCP search type=%s", document_type)
-        return _to_specialist_result(search_result, document_type)
+        specialist_result = _to_specialist_result(search_result, document_type)
+        return specialist_result.model_copy(
+            update={
+                "tool_calls": [
+                    ToolCallRecord(
+                        name=(
+                            "search_syllabus"
+                            if selected_type == "syllabus"
+                            else "search_book_recommendations"
+                        ),
+                        arguments={"query": query},
+                    )
+                    for selected_type, _ in search_results
+                ]
+            }
+        )

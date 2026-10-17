@@ -207,6 +207,17 @@ curl -X POST "http://127.0.0.1:5000/api/v1/query/${REQUEST_ID}/resume" \
 
 The Finance board-candidate confirmation uses a LangGraph interrupt. For academic book requests that omit language, the academic MCP tool uses MCP elicitation to ask the user to choose English or Hindi; the Flask UI polls the pending elicitation endpoint while the original query request waits. The browser supplies a UUID `request_id` so the MCP client's elicitation callback can match the prompt to the browser. Direct API clients that want interactive elicitation must also provide a UUID and poll `/api/v1/elicitation/<request_id>`; submit a choice to `/api/v1/elicitation/<request_id>/answer`. The current elicitation broker is in process memory, so the query and its poll/answer requests must reach the same running process. Use shared state and request routing before deploying multiple workers. After initializing the schema, configure the PDF path and ingestion key, then call the ingestion endpoint before asking academic questions. The built-in Flask server is for local development; use a production WSGI server and a protected network configuration for deployment.
 
+### Optional LangSmith tracing
+
+LangSmith is optional and tracing is disabled by default. To inspect LangGraph runs and LangChain agent/model/tool calls during development, set your own `LANGSMITH_API_KEY` in the untracked `.env` file, then set:
+
+```dotenv
+LANGSMITH_TRACING=true
+LANGSMITH_PROJECT=customer-support-dev
+```
+
+Restart Flask after changing these settings. Traces can contain the submitted question, model inputs and outputs, and retrieved passages; start with dummy or redacted data and review your data-handling requirements before enabling tracing for customer requests. Set `LANGSMITH_TRACING=false` to turn it off. `LANGSMITH_ENDPOINT` is optional and only needed for a non-default regional endpoint.
+
 Example academic request after indexing:
 
 ```bash

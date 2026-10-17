@@ -27,13 +27,13 @@ class FeeLookupRequest(BaseModel):
     @field_validator("standard")
     @classmethod
     def normalize_numeric_standard(cls, value: str) -> str:
-        """Normalize `5`, `Standard 5`, and `Grade 5` to the seeded `Class 5` form."""
+        """Accept supported standards and normalize them to the seeded `Class N` form."""
         match = re.fullmatch(
-            r"(?:(?:class|standard|grade)\s*)?(\d{1,2})", value, re.IGNORECASE
+            r"(?:(?:class|standard|grade)\s*)?(10|[1-9])", value, re.IGNORECASE
         )
-        if match:
-            return f"Class {int(match.group(1))}"
-        return value
+        if not match:
+            raise ValueError("Standard must identify a class from 1 to 10.")
+        return f"Class {int(match.group(1))}"
 
     @field_validator("academic_year")
     @classmethod
@@ -54,6 +54,11 @@ class IntentDecision(BaseModel):
 class Evidence(BaseModel):
     source: str
     detail: str
+
+
+class ToolCallRecord(BaseModel):
+    name: str
+    arguments: dict[str, str]
 
 
 class FeeItem(BaseModel):
@@ -99,6 +104,7 @@ class SpecialistResult(BaseModel):
     answer: str
     evidence: list[Evidence] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
+    tool_calls: list[ToolCallRecord] = Field(default_factory=list)
     needs_follow_up: bool = False
     follow_up_options: list[str] = Field(default_factory=list)
 

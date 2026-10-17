@@ -41,10 +41,13 @@ def _fallback_response(result: SpecialistResult) -> str:
 
 
 def _report_payload(query: str, result: SpecialistResult) -> str:
+    specialist_report = result.model_dump(mode="json")
+    # Evaluation telemetry is internal and should not steer user-facing generation.
+    specialist_report.pop("tool_calls", None)
     return json.dumps(
         {
             "customer_query": query,
-            "specialist_report": result.model_dump(mode="json"),
+            "specialist_report": specialist_report,
         },
         ensure_ascii=False,
     )
