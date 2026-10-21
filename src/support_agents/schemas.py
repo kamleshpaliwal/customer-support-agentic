@@ -107,6 +107,7 @@ class SpecialistResult(BaseModel):
     tool_calls: list[ToolCallRecord] = Field(default_factory=list)
     needs_follow_up: bool = False
     follow_up_options: list[str] = Field(default_factory=list)
+    diagnostics: dict[str, float] = Field(default_factory=dict)
 
 
 class SupportRequest(BaseModel):

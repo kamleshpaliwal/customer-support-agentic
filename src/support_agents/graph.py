@@ -7,6 +7,7 @@ workflow remains testable and does not silently assume a vendor or database.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import perf_counter
 from typing import Protocol, TypedDict
 
 from langgraph.checkpoint.memory import InMemorySaver
@@ -56,28 +57,37 @@ class SupportState(TypedDict, total=False):
     specialist_result: SpecialistResult
     answer: str
     limitations: list[str]
+    node_timings_ms: dict[str, float]
 
 
 def build_support_graph(dependencies: GraphDependencies):
     """Build and compile the support request graph with injected runtime adapters."""
 
     async def detect_intent(state: SupportState) -> dict[str, object]:
+        started = perf_counter()
         decision = await dependencies.intent_detector.detect(state["query"])
+        timings = dict(state.get("node_timings_ms", {}))
+        timings["detect_intent"] = round((perf_counter() - started) * 1000, 1)
         return {
             "intent": decision.intent,
             "clarification_question": decision.clarification_question,
             "fee_lookup": decision.fee_lookup,
+            "node_timings_ms": timings,
         }
 
     async def finance(state: SupportState) -> dict[str, object]:
+        started = perf_counter()
         result = await dependencies.finance_specialist.respond(
             state["query"],
             user_id=state["user_id"],
             fee_lookup=state.get("fee_lookup"),
             request_id=state.get("request_id"),
         )
+        timings = dict(state.get("node_timings_ms", {}))
+        timings["finance"] = round((perf_counter() - started) * 1000, 1)
         update: dict[str, object] = {
             "specialist_result": result,
+            "node_timings_ms": timings,
             "clarification_question": None,
             "clarification_mode": None,
             "clarification_options": [],
@@ -93,6 +103,7 @@ def build_support_graph(dependencies: GraphDependencies):
         return update
 
     async def academic(state: SupportState) -> dict[str, object]:
+        started = perf_counter()
         result = await dependencies.academic_specialist.respond(
             state["query"],
             user_id=state["user_id"],
@@ -103,7 +114,9 @@ def build_support_graph(dependencies: GraphDependencies):
                 else None
             ),
         )
-        return {"specialist_result": result}
+        timings = dict(state.get("node_timings_ms", {}))
+        timings["academic"] = round((perf_counter() - started) * 1000, 1)
+        return {"specialist_result": result, "node_timings_ms": timings}
 
     async def clarification(state: SupportState) -> Command:
         question = state.get("clarification_question")
@@ -187,9 +200,16 @@ def build_support_graph(dependencies: GraphDependencies):
         return {"specialist_result": result}
 
     async def final_response(state: SupportState) -> dict[str, object]:
+        started = perf_counter()
         result = state["specialist_result"]
         answer = await dependencies.final_responder.render(state["query"], result)
-        return {"answer": answer, "limitations": result.limitations}
+        timings = dict(state.get("node_timings_ms", {}))
+        timings["final_response"] = round((perf_counter() - started) * 1000, 1)
+        return {
+            "answer": answer,
+            "limitations": result.limitations,
+            "node_timings_ms": timings,
+        }
 
     def route(state: SupportState) -> str:
         return {

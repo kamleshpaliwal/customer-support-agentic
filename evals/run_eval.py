@@ -132,6 +132,7 @@ async def _invoke_case(graph, case: EvaluationCase, timeout_seconds: int) -> dic
         "specialist": specialist,
         "clarification": interrupt_value,
         "mcp_elicitation": elicitation,
+        "node_timings_ms": state.get("node_timings_ms", {}),
         "duration_seconds": round(time.perf_counter() - started_at, 3),
     }
 
@@ -277,9 +278,43 @@ def _case_result(case: EvaluationCase, actual: dict[str, Any]) -> dict[str, Any]
             for fee in case.expected_fee.values()
             for amount in re.findall(r"\d[\d,]*\.\d{2}", fee)
         }
-        fee_values_match = bool(expected_amounts) and all(
-            amount in evidence for amount in expected_amounts
+        answer = str(actual.get("answer") or "")
+        normalize = lambda text: {
+            amount.replace(",", "")
+            for amount in re.findall(r"\d[\d,]*\.\d{2}", text)
+        }
+        expected_normalized = {amount.replace(",", "") for amount in expected_amounts}
+        evidence_amounts = normalize(evidence)
+        answer_amounts = normalize(answer)
+        requires_inr = any("INR" in fee.upper() for fee in case.expected_fee.values())
+        fee_values_match = (
+            bool(expected_normalized)
+            and expected_normalized.issubset(evidence_amounts)
+            and expected_normalized.issubset(answer_amounts)
+            and answer_amounts.issubset(expected_normalized)
+            and (not requires_inr or "INR" in answer.upper())
         )
+
+    expected_prompt_actions = {
+        "ask_for_missing_fields",
+        "ask_for_valid_academic_year",
+        "confirm_board_candidate_before_lookup",
+        "elicit_language_then_search",
+        "cancel_without_search_or_title",
+    }
+    clarification_expected = case.expected_action in expected_prompt_actions
+    clarification_produced = bool(actual.get("clarification") or actual.get("mcp_elicitation"))
+    forbidden_phrases = case.model_extra.get("expected_forbidden_phrases") or []
+    answer_text = "\n".join(
+        str(part)
+        for part in [actual.get("answer"), (actual.get("specialist") or {}).get("answer")]
+        if part
+    ).casefold()
+    prompt_disclosure_safe = (
+        not any(str(phrase).casefold() in answer_text for phrase in forbidden_phrases)
+        if forbidden_phrases
+        else None
+    )
 
     return {
         "id": case.id,
@@ -301,6 +336,9 @@ def _case_result(case: EvaluationCase, actual: dict[str, Any]) -> dict[str, Any]
             "tool_arguments_correct": arguments_correct,
             "expected_action_satisfied": action_correct,
             "fee_values_correct": fee_values_match,
+            "clarification_expected": clarification_expected,
+            "clarification_produced": clarification_produced,
+            "prompt_disclosure_safe": prompt_disclosure_safe,
             "observed_action": _observed_action(actual),
         },
     }
@@ -314,6 +352,98 @@ def _accuracy(results: list[dict[str, Any]], check_name: str) -> dict[str, int |
         "correct": correct,
         "total": len(evaluated),
         "accuracy": correct / len(evaluated) if evaluated else None,
+    }
+
+
+def _intent_classification_metrics(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Compute one-vs-rest metrics from categorical labels; no AUC without confidence."""
+    labels = ["finance", "academic", "clarification", "unsupported"]
+    predicted_labels = {result["actual"].get("intent") or "unknown" for result in results}
+    columns = labels + sorted(predicted_labels - set(labels))
+    matrix = {expected: {predicted: 0 for predicted in columns} for expected in labels}
+    for result in results:
+        expected = result["expected"]["intent"]
+        predicted = result["actual"].get("intent") or "unknown"
+        matrix.setdefault(expected, {label: 0 for label in columns})
+        matrix[expected][predicted] = matrix[expected].get(predicted, 0) + 1
+
+    total = len(results)
+    per_intent: dict[str, Any] = {}
+    for label in labels:
+        tp = matrix.get(label, {}).get(label, 0)
+        fp = sum(matrix.get(other, {}).get(label, 0) for other in labels if other != label)
+        fn = sum(matrix.get(label, {}).values()) - tp
+        tn = total - tp - fp - fn
+        per_intent[label] = {
+            "support": tp + fn,
+            "true_positive": tp,
+            "false_positive": fp,
+            "false_negative": fn,
+            "true_negative": tn,
+            "precision": tp / (tp + fp) if tp + fp else None,
+            "recall": tp / (tp + fn) if tp + fn else None,
+            "tpr": tp / (tp + fn) if tp + fn else None,
+            "fpr": fp / (fp + tn) if fp + tn else None,
+        }
+    macro_values = {
+        key: [item[key] for item in per_intent.values() if item[key] is not None]
+        for key in ("precision", "recall", "fpr")
+    }
+    return {
+        "labels": labels,
+        "confusion_matrix": matrix,
+        "per_intent": per_intent,
+        "macro_average": {
+            key: sum(values) / len(values) if values else None
+            for key, values in macro_values.items()
+        },
+        "note": "TPR equals recall. FPR is one-vs-rest. ROC AUC is unavailable because the supervisor emits no per-intent confidence scores.",
+    }
+
+
+def _workflow_quality_metrics(
+    cases: list[EvaluationCase], results: list[dict[str, Any]]
+) -> dict[str, Any]:
+    results_by_id = {result["id"]: result for result in results}
+    tool_cases = [case for case in cases if case.expected_tool]
+    tool_successes = 0
+    for case in tool_cases:
+        result = results_by_id.get(case.id)
+        calls = (result or {}).get("actual", {}).get("specialist", {}).get("tool_calls", [])
+        if any(call.get("name") == case.expected_tool for call in calls):
+            tool_successes += 1
+
+    clarification_cases = [
+        result for result in results if result["checks"].get("clarification_expected")
+    ]
+    no_clarification_cases = [
+        result for result in results if result["checks"].get("clarification_expected") is False
+    ]
+    unnecessary = sum(
+        result["checks"].get("clarification_produced", False)
+        for result in no_clarification_cases
+    )
+    correct_clarifications = sum(
+        result["checks"].get("expected_action_satisfied") is True
+        for result in clarification_cases
+    )
+    return {
+        "tool_success_rate": {
+            "successful_calls": tool_successes,
+            "expected_tool_cases": len(tool_cases),
+            "rate": tool_successes / len(tool_cases) if tool_cases else None,
+            "definition": "Expected tool cases whose validated call returned and was recorded by the specialist.",
+        },
+        "clarification_accuracy": {
+            "correct": correct_clarifications,
+            "expected_clarification_cases": len(clarification_cases),
+            "rate": correct_clarifications / len(clarification_cases) if clarification_cases else None,
+        },
+        "unnecessary_clarification_rate": {
+            "unnecessary": unnecessary,
+            "cases_not_expecting_clarification": len(no_clarification_cases),
+            "rate": unnecessary / len(no_clarification_cases) if no_clarification_cases else None,
+        },
     }
 
 
@@ -347,6 +477,11 @@ def main() -> None:
     parser.add_argument("--case-id", action="append", help="Run a selected case; repeatable")
     parser.add_argument("--limit", type=int, help="Run only the first N cases")
     parser.add_argument("--timeout-seconds", type=int, default=600)
+    parser.add_argument(
+        "--ragas",
+        action="store_true",
+        help="Score academic RAG cases with Ragas using local Ollama models",
+    )
     args = parser.parse_args()
 
     cases = load_dataset(args.dataset)
@@ -367,6 +502,15 @@ def main() -> None:
         run_evaluation(cases, timeout_seconds=args.timeout_seconds)
     )
     settings = get_settings()
+    ragas_summary = None
+    if args.ragas:
+        from support_agents.evaluation.ragas import RagasDependencyError, score_rag_results
+
+        try:
+            ragas_summary = asyncio.run(score_rag_results(results, settings))
+        except RagasDependencyError as error:
+            parser.error(str(error))
+
     summary = {
         "cases_requested": len(cases),
         "cases_completed": len(results),
@@ -376,14 +520,16 @@ def main() -> None:
         "tool_argument_accuracy": _accuracy(results, "tool_arguments_correct"),
         "expected_action_accuracy": _accuracy(results, "expected_action_satisfied"),
         "fee_value_accuracy": _accuracy(results, "fee_values_correct"),
+        "intent_classification": _intent_classification_metrics(results),
+        "workflow_quality": _workflow_quality_metrics(cases, results),
+        "prompt_injection_safety": _accuracy(results, "prompt_disclosure_safe"),
         "latency_seconds": {
             "p50": _latency_percentile(results, 50),
             "p95": _latency_percentile(results, 95),
         },
-        "note": (
-            "RAG context and answer quality are captured for review but not scored yet. "
-            "Ragas metrics are planned for a later evaluation step."
-        ),
+        "ragas": ragas_summary
+        or {"enabled": False, "note": "Pass --ragas to score academic RAG cases."},
+        "note": "RAG context and answer quality are scored only when --ragas is enabled.",
     }
     report = {
         "created_at": datetime.now(UTC).isoformat(),

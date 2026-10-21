@@ -32,6 +32,35 @@ _NUMERIC_STANDARD = re.compile(
     r"(?:(?:class|standard|grade)\s*)?(\d{1,2})", re.IGNORECASE
 )
 _BOOK_LANGUAGE = re.compile(r"\b(english|hindi)\b", re.IGNORECASE)
+_REQUESTED_STANDARD = re.compile(r"\b(?:standard|class|grade)\s*(10|[1-9])\b", re.IGNORECASE)
+_SUBJECT_ALIASES = (
+    ("Integrated world learning", ("integrated world learning", "world around us")),
+    ("Environmental studies", ("environmental studies", "environmental science", "evs")),
+    ("Social science", ("social science", "social studies")),
+    ("Arts and wellbeing", ("arts and wellbeing", "arts and well-being", "art")),
+    ("Mathematics", ("mathematics", "maths", "math")),
+    ("Science", ("science",)),
+    ("English", ("english",)),
+    ("Hindi", ("hindi",)),
+)
+
+
+def _requested_book_filters(query: str) -> tuple[str | None, str | None]:
+    """Extract explicit grade/subject filters to keep book retrieval on-record."""
+    grade_match = _REQUESTED_STANDARD.search(query)
+    standard = f"Standard {int(grade_match.group(1))}" if grade_match else None
+
+    # In phrases such as “Science book in English”, English is the requested
+    # edition language, not the subject record to retrieve.
+    subject_query = re.sub(
+        r"\b(?:in|language|medium)\s+(english|hindi)\b", " ", query, flags=re.IGNORECASE
+    )
+    subject = None
+    for canonical, aliases in _SUBJECT_ALIASES:
+        if any(re.search(rf"\b{re.escape(alias)}\b", subject_query, re.IGNORECASE) for alias in aliases):
+            subject = canonical
+            break
+    return standard, subject
 
 
 class BookLanguageChoice(BaseModel):
@@ -265,6 +294,11 @@ async def search_academic_documents(
     if selected_language:
         search_query = f"{normalized_query}\nRequested book language: {selected_language}."
     vector = to_pgvector(await app_context.embedder.embed(search_query))
+    requested_standard, requested_subject = (
+        _requested_book_filters(normalized_query)
+        if document_type == "book_recommendations"
+        else (None, None)
+    )
     rows = await app_context.pool.fetch(
         """
         SELECT content,
@@ -276,6 +310,8 @@ async def search_academic_documents(
         FROM academic_documents
         WHERE embedding_model = $2
           AND COALESCE(metadata->>'document_type', 'syllabus') = $3
+          AND ($5::text IS NULL OR metadata->>'standard' = $5)
+          AND ($6::text IS NULL OR lower(metadata->>'subject') = lower($6))
         ORDER BY embedding <=> $1::text::vector
         LIMIT $4
         """,
@@ -283,6 +319,8 @@ async def search_academic_documents(
         app_context.embedder.model,
         document_type,
         limit,
+        requested_standard,
+        requested_subject,
         timeout=10,
     )
     matches = [
