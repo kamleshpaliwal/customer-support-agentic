@@ -23,6 +23,15 @@ from support_agents.mcp.elicitation import elicitation_broker
 from support_agents.settings import PROJECT_ROOT, configure_langsmith_tracing, get_settings
 
 DATASET_PATH = PROJECT_ROOT / "evals" / "datasets" / "support_eval.jsonl"
+_TITLE_ABSENCE_PATTERNS = (
+    re.compile(
+        r"\b(?:does not|doesn't|did not|didn't)\s+(?:name|identify|specify|list|provide)"
+        r"\b.{0,80}\b(?:specific\s+)?(?:book\s+|textbook\s+)?title\b",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(r"\bno\s+(?:specific\s+)?(?:book\s+|textbook\s+)?title\b", re.IGNORECASE),
+    re.compile(r"\btitle\s+(?:isn't|is not)\s+(?:named|identified|specified|listed|provided)\b", re.IGNORECASE),
+)
 
 
 class EvaluationCase(BaseModel):
@@ -197,6 +206,80 @@ def _observed_action(actual: dict[str, Any]) -> str:
     return "tool_call_without_evidence"
 
 
+def _abstention_correct(actual: dict[str, Any]) -> bool:
+    """Check that a no-title case searches evidence and explicitly abstains.
+
+    This is a deterministic behavior check, not an LLM judgment of whether
+    every possible title has been hallucinated.
+    """
+    specialist = actual.get("specialist") or {}
+    calls = specialist.get("tool_calls", [])
+    evidence = specialist.get("evidence", [])
+    answer = str(actual.get("answer") or "")
+    searched_books = any(
+        call.get("name") == "search_book_recommendations" for call in calls
+    )
+    explicitly_says_title_missing = any(
+        pattern.search(answer) for pattern in _TITLE_ABSENCE_PATTERNS
+    )
+    return bool(searched_books and evidence and explicitly_says_title_missing)
+
+
+def _scope_limit_answer_correct(case: EvaluationCase, actual: dict[str, Any]) -> bool:
+    """Check a correct answer that must explain the indexed source's scope limit."""
+    if case.expected_action != "answer_with_scope_limit_or_refer_to_school":
+        return False
+
+    answer = str(actual.get("answer") or "").casefold()
+    query = case.user_input.casefold()
+    limitation_phrases = (
+        "cannot establish",
+        "does not provide",
+        "does not specify",
+        "not an official",
+        "not the exact",
+        "cannot determine",
+    )
+    if not any(phrase in answer for phrase in limitation_phrases):
+        return False
+
+    expected_arguments = case.expected_tool_arguments
+    standard = str(expected_arguments.get("standard") or "")
+    standard_number = re.search(r"\d+", standard)
+    if standard_number and not re.search(
+        rf"\b(?:standard|class|grade)\s*{re.escape(standard_number.group())}\b",
+        answer,
+    ):
+        return False
+
+    academic_year = str(expected_arguments.get("academic_year") or "")
+    if academic_year:
+        year_pattern = re.escape(academic_year[:4]) + r"\s*[-–]\s*" + re.escape(academic_year[-4:])
+        if not re.search(year_pattern, answer):
+            return False
+
+    referral_verbs = ("consult", "check", "refer to", "contact")
+    if not any(verb in answer for verb in referral_verbs):
+        return False
+    if "school" in query and "school" not in answer:
+        return False
+    if "cbse" in query and "cbse" not in answer:
+        return False
+    if "chapter-by-chapter" in query and "chapter" not in answer:
+        return False
+
+    subject_aliases = {
+        "mathematics": ("mathematics", "maths", "math"),
+        "science": ("science",),
+        "english": ("english",),
+        "hindi": ("hindi",),
+    }
+    for subject, aliases in subject_aliases.items():
+        if subject in query and not any(alias in answer for alias in aliases):
+            return False
+    return True
+
+
 def _action_check(case: EvaluationCase, actual: dict[str, Any]) -> bool:
     action = case.expected_action
     observed = _observed_action(actual)
@@ -241,6 +324,8 @@ def _action_check(case: EvaluationCase, actual: dict[str, Any]) -> bool:
         return bool(prompt) and {"English", "Hindi"}.issubset(set(prompt.get("options", [])))
     if action == "cancel_without_search_or_title":
         return observed == action and not evidence
+    if action == "abstain_from_inventing_title":
+        return _abstention_correct(actual)
     if action == "skip_language_elicitation_then_search":
         return not actual.get("mcp_elicitation") and bool(evidence)
     if action == "answer_from_tool":
@@ -339,6 +424,16 @@ def _case_result(case: EvaluationCase, actual: dict[str, Any]) -> dict[str, Any]
             "clarification_expected": clarification_expected,
             "clarification_produced": clarification_produced,
             "prompt_disclosure_safe": prompt_disclosure_safe,
+            "abstention_correct": (
+                _abstention_correct(actual)
+                if case.expected_action == "abstain_from_inventing_title"
+                else None
+            ),
+            "scope_limit_answer_correct": (
+                _scope_limit_answer_correct(case, actual)
+                if case.expected_action == "answer_with_scope_limit_or_refer_to_school"
+                else None
+            ),
             "observed_action": _observed_action(actual),
         },
     }
@@ -519,6 +614,22 @@ def main() -> None:
         "tool_selection_accuracy": _accuracy(results, "tool_selection_correct"),
         "tool_argument_accuracy": _accuracy(results, "tool_arguments_correct"),
         "expected_action_accuracy": _accuracy(results, "expected_action_satisfied"),
+        "scope_limit_answer_accuracy": {
+            **_accuracy(results, "scope_limit_answer_correct"),
+            "definition": (
+                "For exact-syllabus requests outside the indexed guide's scope, requires a clear "
+                "limitation, the requested standard and academic year, and a referral to the "
+                "relevant school or board."
+            ),
+        },
+        "abstention_quality": {
+            **_accuracy(results, "abstention_correct"),
+            "definition": (
+                "For no-title book cases, requires a book-search tool call, retrieved evidence, "
+                "and an explicit statement that the guide does not identify a title. This is "
+                "a deterministic behavior check, not a guarantee that every invented title is detected."
+            ),
+        },
         "fee_value_accuracy": _accuracy(results, "fee_values_correct"),
         "intent_classification": _intent_classification_metrics(results),
         "workflow_quality": _workflow_quality_metrics(cases, results),

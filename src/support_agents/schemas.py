@@ -87,6 +87,7 @@ class AcademicSearchMatch(BaseModel):
     content: str
     source: str
     page: int | None = None
+    page_end: int | None = None
     standard: str | None = None
     subject: str | None = None
     similarity_score: float = Field(ge=-1.0, le=1.0)

@@ -26,6 +26,11 @@ Preserve every amount, currency, and billing frequency exactly as provided. If t
 needs more information, ask the customer for it. If no record was found or a limitation exists,
 state that clearly without claiming the request succeeded. For academic answers, keep the
 source's scope clear and do not present a general overview as an official school-specific syllabus.
+When requested information is missing from the specialist report or retrieved evidence, say only
+that the source does not provide that information. Do not infer that the information, policy,
+syllabus, or title does not exist. For example, say "The indexed guide does not provide the exact
+syllabus," not "No official syllabus exists," unless the evidence explicitly supports that broader
+claim.
 For book recommendations, directly state the exact title(s) present in the specialist report for
 the requested standard and subject. Never contradict a named title in the report, mix titles from
 other standards or subjects, or add a follow-up question unless the specialist explicitly asks one.
@@ -63,6 +68,113 @@ def _report_payload(query: str, result: SpecialistResult) -> str:
 
 def _uses_book_search(result: SpecialistResult) -> bool:
     return any(call.name == "search_book_recommendations" for call in result.tool_calls)
+
+
+def _render_scope_limited_syllabus_answer(
+    query: str, result: SpecialistResult
+) -> str | None:
+    """Answer exact-syllabus requests directly when evidence states its scope limit."""
+    if result.specialist != "academic" or _uses_book_search(result):
+        return None
+    if not any(call.name == "search_syllabus" for call in result.tool_calls):
+        return None
+
+    normalized_query = query.casefold()
+    asks_syllabus = "syllabus" in normalized_query or "curriculum" in normalized_query
+    asks_exact_scope = (
+        ("school" in normalized_query and any(term in normalized_query for term in ("exact", "specific")))
+        or "chapter-by-chapter" in normalized_query
+        or (
+            "official" in normalized_query
+            and re.search(r"20\d{2}\s*[-–]\s*20\d{2}", normalized_query) is not None
+        )
+    )
+    evidence_text = " ".join(item.detail.casefold() for item in result.evidence)
+    has_scope_limit = any(
+        phrase in evidence_text
+        for phrase in (
+            "not an official year-specific syllabus",
+            "cannot establish the exact subjects or syllabus for a particular school",
+        )
+    )
+    if not (asks_syllabus and asks_exact_scope and has_scope_limit):
+        return None
+
+    standard_match = re.search(r"\b(?:standard|class|grade)\s*(10|[1-9])\b", normalized_query)
+    standard = f"Standard {standard_match.group(1)}" if standard_match else "the requested standard"
+    year_match = re.search(r"\b(20\d{2})\s*[-–]\s*(20\d{2})\b", query)
+    year = f"{year_match.group(1)}–{year_match.group(2)}" if year_match else None
+    subject_aliases = (
+        ("Integrated world learning", ("integrated world learning", "world around us")),
+        ("Environmental studies", ("environmental studies", "environmental science", "evs")),
+        ("Social science", ("social science", "social studies")),
+        ("Mathematics", ("mathematics", "maths", "math")),
+        ("Science", ("science",)),
+        ("English", ("english",)),
+        ("Hindi", ("hindi",)),
+    )
+    subject = next(
+        (
+            canonical
+            for canonical, aliases in subject_aliases
+            if any(re.search(rf"\b{re.escape(alias)}\b", normalized_query) for alias in aliases)
+        ),
+        None,
+    )
+    asks_chapter_list = "chapter-by-chapter" in normalized_query or "chapter by chapter" in normalized_query
+    asks_official = "official" in normalized_query
+    asks_school_specific = "school" in normalized_query and any(
+        term in normalized_query for term in ("exact", "specific")
+    )
+
+    source_names: list[str] = []
+    pages: set[int] = set()
+    for item in result.evidence:
+        source_name = re.sub(r",\s*pages?\s+\d+(?:-\d+)?$", "", item.source, flags=re.I)
+        if source_name and source_name not in source_names:
+            source_names.append(source_name)
+        page_match = re.search(r"pages?\s+(\d+)(?:-(\d+))?$", item.source, flags=re.I)
+        if page_match:
+            start = int(page_match.group(1))
+            end = int(page_match.group(2) or start)
+            pages.update(range(start, end + 1))
+
+    citation = ""
+    if source_names:
+        source = source_names[0]
+        page_list = ", ".join(str(page) for page in sorted(pages))
+        citation = f" ({source}{f', pages {page_list}' if page_list else ''})"
+    if asks_chapter_list:
+        requested_detail = "chapter-by-chapter "
+        if subject:
+            requested_detail += f"{subject} "
+        requested_detail += "syllabus"
+        year_phrase = f" for {year}" if year else ""
+        answer = (
+            f"The indexed guide does not provide the {requested_detail} for {standard}"
+            f"{year_phrase}. It is a broad overview, not an official chapter list. "
+            "Please consult the current CBSE syllabus or your school's curriculum."
+        )
+    elif asks_official:
+        year_phrase = f" for {year}" if year else ""
+        answer = (
+            f"The indexed guide is a broad CBSE-aligned overview, not the exact official "
+            f"CBSE syllabus for {standard}{year_phrase}. Please consult the current CBSE "
+            "or school syllabus for exact details."
+        )
+    elif asks_school_specific:
+        year_phrase = f" for {year}" if year else ""
+        answer = (
+            f"The indexed guide is a general overview and cannot establish your school's exact "
+            f"{standard} syllabus{year_phrase}. Please consult your school's current curriculum."
+        )
+    else:
+        year_phrase = f" for {year}" if year else ""
+        answer = (
+            f"The indexed guide does not provide the exact syllabus for {standard}{year_phrase}. "
+            "Please consult the current school curriculum."
+        )
+    return f"{answer}{citation}"
 
 
 _FEE_DETAIL = re.compile(
@@ -189,6 +301,9 @@ class OllamaFinalResponder:
         verified_fee_answer = _render_verified_fee_answer(query, result)
         if verified_fee_answer is not None:
             return verified_fee_answer
+        scope_answer = _render_scope_limited_syllabus_answer(query, result)
+        if scope_answer is not None:
+            return scope_answer
         # Book responses contain source-grounded title and edition caveats already.
         # Pass that validated specialist text through so the renderer cannot turn
         # an NCERT-first starting point into a school mandate or purchase advice.
@@ -252,6 +367,9 @@ class BedrockFinalResponder:
         verified_fee_answer = _render_verified_fee_answer(query, result)
         if verified_fee_answer is not None:
             return verified_fee_answer
+        scope_answer = _render_scope_limited_syllabus_answer(query, result)
+        if scope_answer is not None:
+            return scope_answer
         if _uses_book_search(result):
             return result.answer.strip()
         try:

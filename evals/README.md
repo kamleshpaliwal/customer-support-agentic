@@ -34,6 +34,8 @@ python evals/run_eval.py --ragas
 
 Ragas scores context precision, context recall, faithfulness, and answer relevancy. It uses the local Ollama academic model as its evaluator and the configured Ollama embedding model for answer relevancy. This avoids paid evaluator APIs, but uses local compute and may take longer. Cases without human-labeled reference contexts are marked as skipped; metric errors are recorded per case without discarding the baseline evaluation results. Per-case scores and aggregate means appear under `summary.ragas`.
 
+Book cases with `expected_action: "abstain_from_inventing_title"` are handled separately: Ragas context recall and faithfulness are marked not applicable because the expected answer depends on a title being absent from the section, not on a positive fact appearing in a passage. Context precision and answer relevancy remain scored when evidence was retrieved. The report adds `checks.abstention_correct` and `summary.abstention_quality`; this deterministic check requires a book-search tool call, retrieved evidence, and an explicit statement that the guide does not identify a title. It is a behavior signal, not a guarantee that every possible invented title is detected.
+
 You can choose an output path or run a small subset:
 
 ```bash
@@ -61,7 +63,7 @@ For MCP language-elicitation cases, the runner records the pending question and 
 - Fee cases use demo data only. Do not substitute real customer records into this committed file.
 - Book titles and caveats reflect the contents of the local generated PDF. The PDF itself says to confirm current NCERT editions and school lists; the evaluation labels do not independently verify the live catalogue.
 - The academic PDF references and excerpts were checked against the local PDFs. The book recommendation document uses page ranges because one Standard-and-subject record spans multiple pages.
-- `reference_contexts` are human-labeled evidence references. Ragas scores the actual retrieved passages saved from specialist evidence; it does not compare the expected excerpts to themselves.
+- `reference_contexts` are human-labeled evidence references. Ragas scores the actual retrieved passages saved from specialist evidence; it does not compare the expected excerpts to themselves. Retrieved source and full page-range labels are included with the original passage text so the judge can validate answer citations and caveats. The Ragas context limit is 5,000 characters per passage. For `context_precision` and `context_recall`, `reference` must be a target answer/fact set, not an instruction describing how the agent should behave.
 - `expected_action_satisfied` checks observable workflow behavior. Ragas adds estimated retrieval and answer-quality scores; review per-case scores and outputs rather than treating an aggregate as a pass/fail guarantee.
 - Reports include a multiclass intent confusion matrix and one-vs-rest precision, recall/TPR, and FPR. ROC AUC is not computed until the supervisor emits calibrated confidence scores.
 - Reports include tool-success and clarification metrics. Finance amount accuracy checks expected amounts against both returned evidence and the final user-facing answer.

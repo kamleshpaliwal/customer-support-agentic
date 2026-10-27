@@ -63,6 +63,18 @@ def _requested_book_filters(query: str) -> tuple[str | None, str | None]:
     return standard, subject
 
 
+def _is_exact_syllabus_scope_query(query: str) -> bool:
+    """Recognize requests the indexed guide explicitly says it cannot define."""
+    normalized = query.casefold()
+    asks_for_syllabus = "syllabus" in normalized or "curriculum" in normalized
+    asks_for_exact_scope = (
+        ("school" in normalized and any(term in normalized for term in ("exact", "specific")))
+        or "chapter-by-chapter" in normalized
+        or ("official" in normalized and re.search(r"20\d{2}\s*[-–]\s*20\d{2}", normalized) is not None)
+    )
+    return asks_for_syllabus and asks_for_exact_scope
+
+
 class BookLanguageChoice(BaseModel):
     language: Literal["English", "Hindi"] = Field(
         description="Language for the requested book recommendations."
@@ -291,6 +303,16 @@ async def search_academic_documents(
     settings = get_settings()
     app_context = cast(AppContext, ctx.request_context.lifespan_context)
     search_query = normalized_query
+    scope_query = document_type == "syllabus" and _is_exact_syllabus_scope_query(
+        normalized_query
+    )
+    if scope_query:
+        # Surface the guide's explicit scope caveat instead of ranking a grade's
+        # subject list above the answer to an exact/school-specific syllabus ask.
+        search_query += (
+            " The source is a broad overview, not an official year-specific syllabus; "
+            "it cannot establish the exact syllabus for a particular school."
+        )
     if selected_language:
         search_query = f"{normalized_query}\nRequested book language: {selected_language}."
     vector = to_pgvector(await app_context.embedder.embed(search_query))
@@ -304,6 +326,7 @@ async def search_academic_documents(
         SELECT content,
                metadata->>'source_title' AS source,
                NULLIF(metadata->>'page', '')::INTEGER AS page,
+               NULLIF(metadata->>'page_end', '')::INTEGER AS page_end,
                metadata->>'standard' AS standard,
                metadata->>'subject' AS subject,
                1 - (embedding <=> $1::text::vector) AS similarity_score
@@ -312,6 +335,11 @@ async def search_academic_documents(
           AND COALESCE(metadata->>'document_type', 'syllabus') = $3
           AND ($5::text IS NULL OR metadata->>'standard' = $5)
           AND ($6::text IS NULL OR lower(metadata->>'subject') = lower($6))
+          AND (
+                NOT $7::boolean
+                OR content ILIKE '%not an official year-specific syllabus%'
+                OR content ILIKE '%cannot establish the exact subjects or syllabus for a particular school%'
+              )
         ORDER BY embedding <=> $1::text::vector
         LIMIT $4
         """,
@@ -321,6 +349,7 @@ async def search_academic_documents(
         limit,
         requested_standard,
         requested_subject,
+        scope_query,
         timeout=10,
     )
     matches = [
@@ -328,6 +357,7 @@ async def search_academic_documents(
             content=row["content"],
             source=row["source"] or "Academic subject guide",
             page=row["page"],
+            page_end=row["page_end"],
             standard=row["standard"],
             subject=row["subject"],
             similarity_score=min(1.0, max(-1.0, float(row["similarity_score"]))),

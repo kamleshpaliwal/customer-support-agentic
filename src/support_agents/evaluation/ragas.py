@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from support_agents.settings import Settings
@@ -14,7 +15,8 @@ METRIC_NAMES = (
     "faithfulness",
     "answer_relevancy",
 )
-MAX_CONTEXT_CHARS = 1000
+MAX_CONTEXT_CHARS = 5000
+LOGGER = logging.getLogger(__name__)
 
 
 class RagasDependencyError(RuntimeError):
@@ -88,6 +90,9 @@ async def score_rag_results(
         client=ollama_client,
         temperature=0,
         max_tokens=1024,
+        # Qwen's hidden reasoning tokens are wasteful for these short,
+        # schema-constrained scoring judgments and can dominate local eval time.
+        extra_body={"think": False},
     )
     evaluator_embeddings = embedding_factory(
         "openai",
@@ -134,7 +139,10 @@ async def score_rag_results(
 
         specialist = actual.get("specialist") or {}
         retrieved_contexts = [
-            str(item["detail"])[:MAX_CONTEXT_CHARS]
+            # Preserve citations in the judge's input. The final answer may cite
+            # a PDF page, while the evidence detail alone contains only its text.
+            f"[Source: {item.get('source', 'retrieved document')}] "
+            f"{str(item['detail'])[:MAX_CONTEXT_CHARS]}"
             for item in specialist.get("evidence", [])
             if item.get("detail")
         ]
@@ -147,12 +155,53 @@ async def score_rag_results(
         user_input = str(case_result.get("user_input", ""))
         reference = str(expected.get("reference", ""))
         case_scores: dict[str, Any] = {}
-        applicable_metrics = (
-            metrics.items()
-            if retrieved_contexts
-            else ((name, metric) for name, metric in metrics.items() if name == "answer_relevancy")
+        abstention_case = expected.get("action") == "abstain_from_inventing_title"
+        scope_limit_case = (
+            expected.get("action") == "answer_with_scope_limit_or_refer_to_school"
         )
+        metrics_not_applicable: dict[str, str] = {}
+        if abstention_case:
+            # A missing title is a negative fact: the retrieved section can be
+            # relevant without containing a literal sentence saying no title exists.
+            # Standard recall/faithfulness judges can therefore penalize a correct abstention.
+            metrics_not_applicable = {
+                "context_recall": (
+                    "This case tests whether a title is absent; the reference is not a positive "
+                    "fact that must appear verbatim in a retrieved passage. Use the separate "
+                    "abstention_correct check."
+                ),
+                "faithfulness": (
+                    "The answer's key claim is that no title is named, which is inferred from "
+                    "the relevant section's contents. The standard claim-to-context judge is not "
+                    "reliable for this negative-fact case; use abstention_correct instead."
+                ),
+            }
+        if scope_limit_case:
+            # AnswerRelevancy intentionally scores zero when its question-generation
+            # judge marks every generated question as noncommittal. A correct answer
+            # that explains the guide lacks an exact syllabus can trigger that rule,
+            # so evaluate it with the explicit scope-limit check instead.
+            metrics_not_applicable["answer_relevancy"] = (
+                "The expected answer is a grounded scope limitation, not the requested "
+                "syllabus itself. Ragas AnswerRelevancy treats such correct noncommittal "
+                "answers as zero; use scope_limit_answer_correct for this case."
+            )
+        if retrieved_contexts:
+            applicable_names = [
+                name for name in metrics
+                if not (abstention_case and name in {"context_recall", "faithfulness"})
+                and not (scope_limit_case and name == "answer_relevancy")
+            ]
+        else:
+            applicable_names = ["answer_relevancy"]
+            metrics_not_applicable.update({
+                name: "No retrieved evidence was captured for this case."
+                for name in metrics
+                if name != "answer_relevancy"
+            })
+        applicable_metrics = [(name, metrics[name]) for name in applicable_names]
         applicable_metric_names = [name for name, _ in applicable_metrics]
+        case_id = case_result.get("id", "unknown")
 
         for name in applicable_metric_names:
             metric = metrics[name]
@@ -172,10 +221,17 @@ async def score_rag_results(
                     "reason": getattr(result, "reason", None),
                 }
                 score_values[name].append(value)
+                LOGGER.info("Ragas scored case=%s metric=%s score=%.4f", case_id, name, value)
             except Exception as error:
                 case_scores[name] = {
                     "error": f"{type(error).__name__}: {error}"
                 }
+                LOGGER.warning(
+                    "Ragas scoring failed case=%s metric=%s error=%s",
+                    case_id,
+                    name,
+                    type(error).__name__,
+                )
 
         successful_scores = sum("score" in item for item in case_scores.values())
         if successful_scores:
@@ -186,6 +242,7 @@ async def score_rag_results(
                 "status": "partial" if is_partial else "completed",
                 "retrieved_context_count": len(retrieved_contexts),
                 "metrics_applicable": applicable_metric_names,
+                "metrics_not_applicable": metrics_not_applicable,
                 "metrics": case_scores,
             }
         else:
@@ -195,6 +252,7 @@ async def score_rag_results(
                 "reason": "No Ragas metric completed successfully.",
                 "retrieved_context_count": len(retrieved_contexts),
                 "metrics_applicable": applicable_metric_names,
+                "metrics_not_applicable": metrics_not_applicable,
                 "metrics": case_scores,
             }
 

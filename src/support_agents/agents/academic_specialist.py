@@ -26,6 +26,7 @@ from support_agents.settings import get_settings
 
 logger = logging.getLogger(__name__)
 _CURRENT_REQUEST_ID: ContextVar[str | None] = ContextVar("academic_request_id", default=None)
+_CURRENT_USER_QUERY: ContextVar[str | None] = ContextVar("academic_user_query", default=None)
 _CURRENT_PROFILE: ContextVar[dict[str, float] | None] = ContextVar("academic_profile", default=None)
 _BOOK_TITLE = re.compile(
     r"Recommended NCERT starting point\s+(.+?)(?=\s+Grade\s+\d+\b|\s+Recommendation status\b|$)",
@@ -55,6 +56,20 @@ NO_TOOL_FOLLOW_UP = (
 )
 
 
+def _is_exact_syllabus_scope_query(query: str) -> bool:
+    normalized = query.casefold()
+    asks_for_syllabus = "syllabus" in normalized or "curriculum" in normalized
+    asks_for_exact_scope = (
+        ("school" in normalized and any(term in normalized for term in ("exact", "specific")))
+        or "chapter-by-chapter" in normalized
+        or (
+            "official" in normalized
+            and re.search(r"20\d{2}\s*[-–]\s*20\d{2}", normalized) is not None
+        )
+    )
+    return asks_for_syllabus and asks_for_exact_scope
+
+
 def _recommended_title(content: str) -> str | None:
     """Extract a concrete title only when the source names one explicitly."""
     match = _BOOK_TITLE.search(content)
@@ -73,6 +88,14 @@ def _book_status(content: str) -> str | None:
         re.IGNORECASE | re.DOTALL,
     )
     return " ".join(match.group(1).split()) if match else None
+
+
+def _page_label(match: AcademicSearchMatch) -> str | None:
+    if match.page is None:
+        return None
+    if match.page_end is not None and match.page_end > match.page:
+        return f"pages {match.page}-{match.page_end}"
+    return f"page {match.page}"
 
 
 def _to_specialist_result(
@@ -106,7 +129,7 @@ def _to_specialist_result(
         if named_recommendations:
             lines = [
                 f"- {standard} {subject}: {title}"
-                + (f" (page {match.page})" if match.page is not None else "")
+                + (f" ({_page_label(match)})" if _page_label(match) else "")
                 for match, (standard, subject, title) in zip(
                     [match for match in search.matches if _recommended_title(match.content)],
                     named_recommendations,
@@ -124,7 +147,8 @@ def _to_specialist_result(
             answer = (
                 f"The indexed guide does not name a specific book title for "
                 f"{first_match.standard or 'the requested standard'} "
-                f"{first_match.subject or 'subject'} (page {first_match.page}). "
+                f"{first_match.subject or 'subject'}"
+                f"{f' ({_page_label(first_match)})' if _page_label(first_match) else ''}. "
                 "Check the current school list or NCERT catalogue for the exact title and edition."
             )
         limitation = (
@@ -152,19 +176,12 @@ def _to_specialist_result(
 
     evidence = []
     for match in search.matches:
-        source = f"{match.source}, page {match.page}" if match.page is not None else match.source
+        page_label = _page_label(match)
+        source = f"{match.source}, {page_label}" if page_label else match.source
         if document_type == "book_recommendations":
-            title = _recommended_title(match.content)
-            status = _book_status(match.content)
-            if title:
-                detail = (
-                    f"{match.standard} / {match.subject}: Recommended NCERT starting point {title}. "
-                    f"Recommendation status: {status or 'verify the current title and edition.'} "
-                    "The guide says to confirm the current title, language, edition, session, and "
-                    "school list before purchase; it does not say the school requires this book."
-                )
-            else:
-                detail = f"{match.standard} / {match.subject}: {match.content[:700]}"
+            # Keep the passage verbatim for grounding and evaluation. A generated
+            # summary can hide caveats or make synthesized text look retrieved.
+            detail = f"{match.standard} / {match.subject}: {match.content}"
         else:
             detail = (
                 f"{match.standard} / {match.subject}: {match.content}"
@@ -218,8 +235,18 @@ class AcademicSpecialist:
         async def timed_search(query: str, document_type: AcademicDocumentType) -> str:
             started = perf_counter()
             try:
+                original_query = _CURRENT_USER_QUERY.get()
+                search_query = query
+                if (
+                    document_type == "syllabus"
+                    and original_query
+                    and _is_exact_syllabus_scope_query(original_query)
+                ):
+                    # Preserve explicit scope words if the tool-calling model
+                    # paraphrases them away while preparing its retrieval query.
+                    search_query = original_query
                 result = await client.search(
-                    query,
+                    search_query,
                     document_type=document_type,
                     request_id=_CURRENT_REQUEST_ID.get(),
                 )
@@ -263,6 +290,7 @@ class AcademicSpecialist:
     ) -> SpecialistResult:
         del user_id, fee_lookup
         request_id_token = _CURRENT_REQUEST_ID.set(request_id)
+        user_query_token = _CURRENT_USER_QUERY.set(query)
         profile: dict[str, float] = {}
         profile_token = _CURRENT_PROFILE.set(profile)
         started = perf_counter()
@@ -288,6 +316,7 @@ class AcademicSpecialist:
         finally:
             profile["agent_ms"] = (perf_counter() - started) * 1000
             _CURRENT_PROFILE.reset(profile_token)
+            _CURRENT_USER_QUERY.reset(user_query_token)
             _CURRENT_REQUEST_ID.reset(request_id_token)
 
         search_results = _tool_search_results(result)
