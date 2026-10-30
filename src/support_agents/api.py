@@ -1,28 +1,40 @@
-"""Flask HTTP API for submitting customer support requests to LangGraph."""
+"""FastAPI HTTP API for submitting customer support requests to LangGraph."""
 
 from __future__ import annotations
 
-import asyncio
 import hmac
+import json
 import logging
-from typing import Literal
+from contextlib import asynccontextmanager
+from typing import Literal, TypeVar
 from uuid import UUID, uuid4
 
-from flask import Flask, jsonify, render_template, request
+from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from langgraph.types import Command
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
-from werkzeug.exceptions import BadRequest
 
 from support_agents.agents.academic_specialist import AcademicSpecialist
 from support_agents.agents.final_responder import create_final_responder
 from support_agents.agents.finance_specialist import FinanceSpecialist
 from support_agents.agents.supervisor import create_intent_detector
+from support_agents.checkpointer import close_checkpointer, create_checkpointer
+from support_agents.db.connection import create_pool
 from support_agents.db.ingest_academic_pdf import ingest_configured_pdf
 from support_agents.graph import GraphDependencies, build_support_graph
-from support_agents.mcp.elicitation import elicitation_broker
+from support_agents.mcp.elicitation import (
+    ElicitationBroker,
+    InMemoryElicitationBroker,
+    PostgresElicitationBroker,
+    set_elicitation_broker,
+)
 from support_agents.settings import PROJECT_ROOT, configure_langsmith_tracing, get_settings
 
 logger = logging.getLogger(__name__)
+
+ModelT = TypeVar("ModelT", bound=BaseModel)
+TEMPLATE_PATH = PROJECT_ROOT / "src" / "support_agents" / "templates" / "index.html"
 
 
 class QueryPayload(BaseModel):
@@ -77,250 +89,260 @@ class AcademicIngestPayload(BaseModel):
     document_type: Literal["syllabus", "book_recommendations"] = "syllabus"
 
 
-def create_app(*, graph=None) -> Flask:
-    """Create the Flask app, wiring the configured model and MCP adapters by default."""
+def _error(status: int, message: str, **extra) -> JSONResponse:
+    return JSONResponse({"error": message, **extra}, status_code=status)
 
-    configure_langsmith_tracing()
-    app = Flask(__name__, static_folder=str(PROJECT_ROOT / "static"))
-    support_graph = graph or build_support_graph(
-        GraphDependencies(
-            intent_detector=create_intent_detector(),
-            finance_specialist=FinanceSpecialist(),
-            academic_specialist=AcademicSpecialist(),
-            final_responder=create_final_responder(),
+
+async def _parse_body(
+    request: Request, model: type[ModelT], error_message: str, **extra
+) -> ModelT | JSONResponse:
+    """Validate a JSON body, returning the model or the API's standard error response."""
+    if not request.headers.get("content-type", "").startswith("application/json"):
+        return _error(415, "Content-Type must be application/json.", **extra)
+    try:
+        return model.model_validate(json.loads(await request.body()))
+    except ValidationError as error:
+        return _error(
+            400,
+            error_message,
+            details=error.errors(include_url=False, include_context=False),
+            **extra,
         )
+    except (ValueError, TypeError):
+        return _error(400, "Invalid JSON request body.", **extra)
+
+
+def _valid_uuid(value: str) -> str | None:
+    try:
+        return str(UUID(value))
+    except ValueError:
+        return None
+
+
+def _query_response(result: dict, request_id: str) -> JSONResponse:
+    """Serialize either a completed graph result or a pending clarification."""
+    pending = result.get("__interrupt__", ())
+    if pending:
+        payload = pending[0].value
+        return JSONResponse(
+            {
+                "request_id": request_id,
+                "status": "needs_input",
+                "kind": payload.get("kind", "clarification"),
+                "intent": payload.get("intent", "clarification"),
+                "question": payload.get("question", "Please clarify your request."),
+                "options": payload.get("options", []),
+            }
+        )
+    return JSONResponse(
+        {
+            "request_id": request_id,
+            "status": "completed",
+            "answer": result["answer"],
+            "intent": result["intent"],
+            "limitations": result.get("limitations", []),
+        }
     )
 
-    def query_response(result: dict, request_id: str):
-        """Serialize either a completed graph result or a pending clarification."""
-        pending = result.get("__interrupt__", ())
-        if pending:
-            payload = pending[0].value
-            return jsonify(
-                {
-                    "request_id": request_id,
-                    "status": "needs_input",
-                    "kind": payload.get("kind", "clarification"),
-                    "intent": payload.get("intent", "clarification"),
-                    "question": payload.get("question", "Please clarify your request."),
-                    "options": payload.get("options", []),
-                }
-            )
 
-        return jsonify(
-            {
-                "request_id": request_id,
-                "status": "completed",
-                "answer": result["answer"],
-                "intent": result["intent"],
-                "limitations": result.get("limitations", []),
-            }
-        )
+def create_app(*, graph=None, broker: ElicitationBroker | None = None) -> FastAPI:
+    """Create the app. Graph, checkpointer and broker are built on the server's event loop.
+
+    Passing ``graph`` (and optionally ``broker``) skips the real wiring, for tests.
+    """
+
+    configure_langsmith_tracing()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        checkpointer = None
+        pool = None
+        if graph is not None:
+            app.state.graph = graph
+            app.state.broker = broker or InMemoryElicitationBroker()
+        else:
+            checkpointer = await create_checkpointer()
+            if get_settings().checkpoint_backend == "postgres":
+                pool = await create_pool()
+                app.state.broker = PostgresElicitationBroker(pool)
+            else:
+                app.state.broker = InMemoryElicitationBroker()
+            app.state.graph = build_support_graph(
+                GraphDependencies(
+                    intent_detector=create_intent_detector(),
+                    finance_specialist=FinanceSpecialist(),
+                    academic_specialist=AcademicSpecialist(),
+                    final_responder=create_final_responder(),
+                ),
+                checkpointer=checkpointer,
+            )
+        set_elicitation_broker(app.state.broker)
+        try:
+            yield
+        finally:
+            if checkpointer is not None:
+                await close_checkpointer(checkpointer)
+            if pool is not None:
+                await pool.close()
+
+    app = FastAPI(title="Customer Support Agent System", lifespan=lifespan)
+    app.mount("/static", StaticFiles(directory=PROJECT_ROOT / "static"), name="static")
 
     @app.get("/")
-    def home():
-        return render_template("index.html")
+    async def home():
+        return FileResponse(TEMPLATE_PATH, media_type="text/html")
 
     @app.get("/health")
-    def health():
-        return jsonify({"status": "ok"})
+    async def health():
+        return {"status": "ok"}
 
-    @app.get("/api/v1/elicitation/<request_id>")
-    def get_pending_elicitation(request_id: str):
-        try:
-            request_id = str(UUID(request_id))
-        except ValueError:
-            return jsonify({"error": "Invalid request ID."}), 400
-        pending = elicitation_broker.get_pending(request_id)
+    @app.get("/api/v1/elicitation/{request_id}")
+    async def get_pending_elicitation(request_id: str):
+        request_id = _valid_uuid(request_id)
+        if request_id is None:
+            return _error(400, "Invalid request ID.")
+        pending = await app.state.broker.get_pending(request_id)
         if pending is None:
-            return jsonify({"status": "waiting", "request_id": request_id})
-        return jsonify(
-            {
-                "status": "pending",
-                "request_id": request_id,
-                "question": pending.message,
-                "field": pending.field_name,
-                "options": pending.options,
-            }
-        )
+            return {"status": "waiting", "request_id": request_id}
+        return {
+            "status": "pending",
+            "request_id": request_id,
+            "question": pending.message,
+            "field": pending.field_name,
+            "options": pending.options,
+        }
 
-    @app.post("/api/v1/elicitation/<request_id>/answer")
-    def answer_mcp_elicitation(request_id: str):
+    @app.post("/api/v1/elicitation/{request_id}/answer")
+    async def answer_mcp_elicitation(request_id: str, request: Request):
+        request_id = _valid_uuid(request_id)
+        if request_id is None:
+            return _error(400, "Invalid request ID.")
+        payload = await _parse_body(
+            request, ElicitationAnswerPayload, "Invalid elicitation answer.", request_id=request_id
+        )
+        if isinstance(payload, JSONResponse):
+            return payload
         try:
-            request_id = str(UUID(request_id))
-        except ValueError:
-            return jsonify({"error": "Invalid request ID."}), 400
-        if not request.is_json:
-            return jsonify({"error": "Content-Type must be application/json."}), 415
-        try:
-            payload = ElicitationAnswerPayload.model_validate(request.get_json())
-        except ValidationError as error:
-            return jsonify(
-                {
-                    "error": "Invalid elicitation answer.",
-                    "details": error.errors(include_url=False, include_context=False),
-                    "request_id": request_id,
-                }
-            ), 400
-        except (BadRequest, TypeError, ValueError):
-            return jsonify({"error": "Invalid JSON request body.", "request_id": request_id}), 400
-        try:
-            result = elicitation_broker.submit(request_id, payload.answer)
+            result = await app.state.broker.submit(request_id, payload.answer)
         except LookupError as error:
-            return jsonify({"error": str(error), "request_id": request_id}), 404
+            return _error(404, str(error), request_id=request_id)
         except ValueError as error:
-            return jsonify({"error": str(error), "request_id": request_id}), 400
-        return jsonify({"status": result, "request_id": request_id})
+            return _error(400, str(error), request_id=request_id)
+        return {"status": result, "request_id": request_id}
 
     @app.post("/api/v1/academic/ingest")
-    def ingest_academic_document():
-        settings = get_settings()
-        expected_key = settings.academic_ingest_api_key
+    async def ingest_academic_document(request: Request):
+        expected_key = get_settings().academic_ingest_api_key
         if not expected_key:
-            return jsonify(
-                {"error": "Document ingestion is disabled; configure ACADEMIC_INGEST_API_KEY."}
-            ), 503
+            return _error(503, "Document ingestion is disabled; configure ACADEMIC_INGEST_API_KEY.")
 
-        scheme, separator, supplied_key = request.headers.get("Authorization", "").partition(" ")
+        scheme, separator, supplied_key = request.headers.get("authorization", "").partition(" ")
         if (
             not separator
             or scheme.lower() != "bearer"
             or not hmac.compare_digest(supplied_key.strip(), expected_key)
         ):
-            return jsonify({"error": "A valid bearer token is required."}), 401
+            return _error(401, "A valid bearer token is required.")
 
-        if request.data and not request.is_json:
-            return jsonify({"error": "Content-Type must be application/json when a body is provided."}), 415
+        raw_body = await request.body()
+        if raw_body and not request.headers.get("content-type", "").startswith("application/json"):
+            return _error(415, "Content-Type must be application/json when a body is provided.")
         try:
-            payload_data = request.get_json() if request.is_json else {}
-            payload = AcademicIngestPayload.model_validate(payload_data)
-        except (ValidationError, BadRequest, TypeError, ValueError) as error:
-            details = error.errors(include_url=False, include_context=False) if isinstance(error, ValidationError) else None
-            return jsonify({"error": "Invalid ingestion request.", "details": details}), 400
+            payload = AcademicIngestPayload.model_validate(json.loads(raw_body) if raw_body else {})
+        except ValidationError as error:
+            return _error(
+                400,
+                "Invalid ingestion request.",
+                details=error.errors(include_url=False, include_context=False),
+            )
+        except (ValueError, TypeError):
+            return _error(400, "Invalid ingestion request.", details=None)
 
         try:
-            pdf_path, chunk_count = asyncio.run(
-                ingest_configured_pdf(document_type=payload.document_type)
+            pdf_path, chunk_count = await ingest_configured_pdf(
+                document_type=payload.document_type
             )
         except FileNotFoundError:
             logger.exception("Configured academic PDF was not found")
-            return jsonify({"error": "The configured academic PDF was not found."}), 404
+            return _error(404, "The configured academic PDF was not found.")
         except Exception:
             logger.exception("Academic document ingestion failed")
-            return jsonify({"error": "Academic document ingestion failed."}), 502
+            return _error(502, "Academic document ingestion failed.")
 
-        return jsonify(
-            {
-                "status": "completed",
-                "document_type": payload.document_type,
-                "source_file": pdf_path.name,
-                "chunks_indexed": chunk_count,
-            }
-        )
+        return {
+            "status": "completed",
+            "document_type": payload.document_type,
+            "source_file": pdf_path.name,
+            "chunks_indexed": chunk_count,
+        }
 
     @app.post("/api/v1/query")
-    def submit_query():
-        if not request.is_json:
-            return jsonify(
-                {
-                    "error": "Content-Type must be application/json.",
-                    "request_id": str(uuid4()),
-                }
-            ), 415
-
-        try:
-            payload = QueryPayload.model_validate(request.get_json())
-        except ValidationError as error:
-            request_id = str(uuid4())
-            return jsonify({
-                "error": "Invalid request body.",
-                "details": error.errors(include_url=False, include_context=False),
-                "request_id": request_id,
-            }), 400
-        except (BadRequest, TypeError, ValueError):
-            request_id = str(uuid4())
-            return jsonify({"error": "Invalid JSON request body.", "request_id": request_id}), 400
+    async def submit_query(request: Request):
+        payload = await _parse_body(
+            request, QueryPayload, "Invalid request body.", request_id=str(uuid4())
+        )
+        if isinstance(payload, JSONResponse):
+            return payload
 
         browser_request_id = payload.request_id is not None
         request_id = payload.request_id or str(uuid4())
 
         if not payload.query or not payload.user_id:
-            return jsonify(
-                {
-                    "error": "query and user_id must not be blank.",
-                    "request_id": request_id,
-                }
-            ), 400
+            return _error(400, "query and user_id must not be blank.", request_id=request_id)
 
         try:
-            result = asyncio.run(
-                support_graph.ainvoke(
-                    {
-                        "request_id": request_id,
-                        "user_id": payload.user_id,
-                        "query": payload.query,
-                        "allow_mcp_elicitation": browser_request_id,
-                    },
-                    config={"configurable": {"thread_id": request_id}},
-                )
+            result = await app.state.graph.ainvoke(
+                {
+                    "request_id": request_id,
+                    "user_id": payload.user_id,
+                    "query": payload.query,
+                    "allow_mcp_elicitation": browser_request_id,
+                },
+                config={"configurable": {"thread_id": request_id}},
             )
         except Exception:
             logger.exception("Support graph request failed; request_id=%s", request_id)
-            return jsonify(
-                {
-                    "error": "The support request could not be processed right now.",
-                    "request_id": request_id,
-                }
-            ), 502
+            return _error(
+                502,
+                "The support request could not be processed right now.",
+                request_id=request_id,
+            )
+        return _query_response(result, request_id)
 
-        return query_response(result, request_id)
-
-    @app.post("/api/v1/query/<request_id>/resume")
-    def resume_query(request_id: str):
-        try:
-            request_id = str(UUID(request_id))
-        except ValueError:
-            return jsonify({"error": "Invalid request ID."}), 400
-
-        if not request.is_json:
-            return jsonify({"error": "Content-Type must be application/json."}), 415
-        try:
-            payload = ClarificationPayload.model_validate(request.get_json())
-        except ValidationError as error:
-            return jsonify(
-                {
-                    "error": "Invalid clarification response.",
-                    "details": error.errors(include_url=False, include_context=False),
-                    "request_id": request_id,
-                }
-            ), 400
-        except (BadRequest, TypeError, ValueError):
-            return jsonify({"error": "Invalid JSON request body.", "request_id": request_id}), 400
-
+    @app.post("/api/v1/query/{request_id}/resume")
+    async def resume_query(request_id: str, request: Request):
+        request_id = _valid_uuid(request_id)
+        if request_id is None:
+            return _error(400, "Invalid request ID.")
+        payload = await _parse_body(
+            request, ClarificationPayload, "Invalid clarification response.", request_id=request_id
+        )
+        if isinstance(payload, JSONResponse):
+            return payload
         if not payload.answer:
-            return jsonify({"error": "answer must not be blank.", "request_id": request_id}), 400
+            return _error(400, "answer must not be blank.", request_id=request_id)
 
         try:
-            result = asyncio.run(
-                support_graph.ainvoke(
-                    Command(resume=payload.answer),
-                    config={"configurable": {"thread_id": request_id}},
-                )
+            result = await app.state.graph.ainvoke(
+                Command(resume=payload.answer),
+                config={"configurable": {"thread_id": request_id}},
             )
         except Exception:
             logger.exception("Could not resume support graph; request_id=%s", request_id)
-            return jsonify(
-                {
-                    "error": "This clarification session could not be resumed. It may have expired; please submit your question again.",
-                    "request_id": request_id,
-                }
-            ), 409
-
-        return query_response(result, request_id)
+            return _error(
+                409,
+                "This clarification session could not be resumed. It may have expired; "
+                "please submit your question again.",
+                request_id=request_id,
+            )
+        return _query_response(result, request_id)
 
     return app
 
 
 if __name__ == "__main__":
-    # Convenient local development entry point. Use a production WSGI server for deployment.
-    create_app().run(host="127.0.0.1", port=5000, debug=False)
+    # Local development entry point. For deployment:
+    #   uvicorn support_agents.api:create_app --factory
+    import uvicorn
+
+    uvicorn.run(create_app(), host="127.0.0.1", port=5000)

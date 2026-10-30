@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     langsmith_api_key: SecretStr | None = None
     langsmith_project: str = "customer-support-dev"
     langsmith_endpoint: str | None = None
+    checkpoint_backend: Literal["postgres", "memory"] = "postgres"
     mcp_transport: str = "stdio"
     mcp_host: str = "127.0.0.1"
     mcp_port: int = Field(default=8000, ge=1, le=65535)

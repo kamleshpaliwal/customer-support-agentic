@@ -19,7 +19,7 @@ from support_agents.agents.final_responder import create_final_responder
 from support_agents.agents.finance_specialist import FinanceSpecialist
 from support_agents.agents.supervisor import create_intent_detector
 from support_agents.graph import GraphDependencies, build_support_graph
-from support_agents.mcp.elicitation import elicitation_broker
+from support_agents.mcp.elicitation import get_elicitation_broker
 from support_agents.settings import PROJECT_ROOT, configure_langsmith_tracing, get_settings
 
 DATASET_PATH = PROJECT_ROOT / "evals" / "datasets" / "support_eval.jsonl"
@@ -95,7 +95,11 @@ async def _invoke_case(graph, case: EvaluationCase, timeout_seconds: int) -> dic
 
     try:
         while not invocation.done():
-            pending = elicitation_broker.get_pending(request_id) if expects_elicitation else None
+            pending = (
+                await get_elicitation_broker().get_pending(request_id)
+                if expects_elicitation
+                else None
+            )
             if pending is not None:
                 expected_clarification = case.model_extra.get("expected_clarification") or {}
                 is_expected_user_cancel = expected_clarification.get("user_action") == "cancel"
@@ -111,7 +115,7 @@ async def _invoke_case(graph, case: EvaluationCase, timeout_seconds: int) -> dic
                 }
                 # The dataset checks whether the system asks. Cancel after observing the prompt,
                 # so the offline evaluator never silently chooses a language for the user.
-                elicitation_broker.submit(request_id, "cancel")
+                await get_elicitation_broker().submit(request_id, "cancel")
             if asyncio.get_running_loop().time() >= deadline:
                 raise TimeoutError(f"Case exceeded the {timeout_seconds}s evaluation timeout")
             await asyncio.sleep(0.05)

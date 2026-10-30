@@ -60,8 +60,12 @@ class SupportState(TypedDict, total=False):
     node_timings_ms: dict[str, float]
 
 
-def build_support_graph(dependencies: GraphDependencies):
-    """Build and compile the support request graph with injected runtime adapters."""
+def build_support_graph(dependencies: GraphDependencies, checkpointer=None):
+    """Build and compile the support request graph with injected runtime adapters.
+
+    ``checkpointer`` stores paused (clarification) runs. It defaults to in-process memory,
+    which is only suitable for tests and single-process development.
+    """
 
     async def detect_intent(state: SupportState) -> dict[str, object]:
         started = perf_counter()
@@ -127,7 +131,7 @@ def build_support_graph(dependencies: GraphDependencies):
                 "kind": mode or "clarification",
                 "question": question
                 or "Could you clarify whether your question is about finance or academics?",
-                "intent": state.get("intent", Intent.CLARIFICATION).value,
+                "intent": Intent(state.get("intent", Intent.CLARIFICATION)).value,
                 "options": options,
             }
         )
@@ -217,7 +221,7 @@ def build_support_graph(dependencies: GraphDependencies):
             Intent.ACADEMIC: "academic",
             Intent.CLARIFICATION: "clarification",
             Intent.UNSUPPORTED: "unsupported",
-        }[state["intent"]]
+        }[Intent(state["intent"])]
 
     def route_after_finance(state: SupportState) -> str:
         return "clarification" if state.get("clarification_question") else "final_response"
@@ -248,6 +252,4 @@ def build_support_graph(dependencies: GraphDependencies):
     for node in ("academic", "unsupported"):
         builder.add_edge(node, "final_response")
     builder.add_edge("final_response", END)
-    # Keeps paused conversations resumable across HTTP requests while this process runs.
-    # Replace with a durable checkpointer (for example PostgreSQL) for multi-worker production.
-    return builder.compile(checkpointer=InMemorySaver())
+    return builder.compile(checkpointer=checkpointer or InMemorySaver())

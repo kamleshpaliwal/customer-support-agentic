@@ -17,8 +17,11 @@ dependencies = [
     "asyncpg>=0.29,<1",
     "mcp[cli]>=2,<3",
     "boto3>=1.37,<2",
-    "flask>=3.0,<4",
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.30,<1",
     "pypdf>=5,<7",
+    "langgraph-checkpoint-postgres>=2,<4",
+    "psycopg[binary,pool]>=3.2,<4",
 ]
 
 [project.optional-dependencies]

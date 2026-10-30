@@ -12,7 +12,7 @@ from support_agents.schemas import (
     FeeLookupRequest,
     FeeLookupResult,
 )
-from support_agents.mcp.elicitation import elicitation_broker
+from support_agents.mcp.elicitation import get_elicitation_broker
 from support_agents.settings import PROJECT_ROOT, get_settings
 
 
@@ -96,7 +96,7 @@ class AcademicMCPClient:
             if not field_name or not options:
                 return ElicitResult(action="decline")
 
-            return await elicitation_broker.ask(
+            return await get_elicitation_broker().ask(
                 request_id,
                 message=params.message,
                 field_name=field_name,

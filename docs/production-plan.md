@@ -17,7 +17,7 @@ LangGraph owns end-to-end orchestration. MCP provides the specialist tool interf
 
 ### Implemented in the development application
 
-- Flask API and browser UI with Finance and Academic tabs.
+- FastAPI (async) API and browser UI with Finance and Academic tabs.
 - LangGraph workflow with supervisor intent detection, finance and academic routing, clarification, unsupported handling, and final response nodes.
 - Ollama model adapters for local development and Bedrock adapters for supervisor routing and final response generation.
 - PostgreSQL fee schema, initializer, demo CSV seed importer, and read-only MCP `get_fees` tool.
@@ -33,7 +33,7 @@ LangGraph owns end-to-end orchestration. MCP provides the specialist tool interf
 
 - Academic/finance data is demo or reference content. School-approved fees, curriculum, and book lists need content-owner validation before being presented as authoritative.
 - The labeled evaluation set has been expanded to 36 cases and now reports per-intent classification, clarification, tool-success, finance answer-value, and prompt-injection checks. The expanded workflow run is recorded; the expanded Ragas run still needs completion. Thresholds remain provisional and Ragas remains an LLM-judge estimate.
-- The current graph checkpointer and MCP elicitation broker are in process memory. They require one running process and are not durable or shared between workers.
+- The LangGraph checkpointer is now PostgreSQL-backed by default (`CHECKPOINT_BACKEND=postgres`; `memory` for tests), so paused clarifications survive restarts and are shared across workers. MCP elicitation questions are stored in the `pending_elicitations` table with a 5-minute expiry (polling-based), so multiple API workers are supported; this has been verified with two uvicorn workers, but not load-tested.
 - The ingestion route requires a bearer key when enabled, but user query, resume, and elicitation endpoints do not yet implement user authentication/authorization. `user_id` must not be treated as trusted identity while client-supplied.
 - LangSmith tracing is configurable, but active tracing, redaction, dashboards, alarms, and operational runbooks have not been confirmed.
 - Retries, timeouts, and fallbacks exist in selected paths; system-wide cancellation, idempotency, repeated-tool-call protection, and failure recovery need verification.
@@ -164,7 +164,7 @@ Work through these in order. Preserve evaluation findings as a baseline before m
 
 ### 9. Prepare production operations and release
 
-- Select deployment environment and MCP hosting/transport; deploy behind a production WSGI server with health checks, structured logs, timeouts, and graceful shutdown.
+- Select deployment environment and MCP hosting/transport; deploy behind a production ASGI server (uvicorn) with health checks, structured logs, timeouts, and graceful shutdown.
 - Configure database backups/restore, schema migration, environment-specific secrets, monitoring/alerts, and rollback procedures.
 - Agree on traffic, availability, latency, and resource objectives; load-test concurrent traffic and soak-test sustained traffic, including database pool behavior.
 - Require both automated software tests and agent-quality evaluation thresholds as separate release checks; stage rollout and monitor after release.
