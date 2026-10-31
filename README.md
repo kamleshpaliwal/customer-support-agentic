@@ -31,6 +31,8 @@ src/support_agents/
 ├── mcp/        # MCP client and fee lookup server
 ├── api.py      # FastAPI app (query, resume, elicitation, ingestion routes)
 ├── graph.py    # LangGraph workflow and routing edges
+├── auth.py     # JWT verification and group authorization
+├── ownership.py  # which user owns which request
 ├── checkpointer.py  # PostgreSQL checkpointer for paused sessions
 ├── schemas.py  # shared request, decision, and result models
 └── settings.py # environment-backed configuration
@@ -217,7 +219,7 @@ When a question needs clarification, the LangGraph run pauses and its state is s
 uvicorn support_agents.api:create_app --factory --host 0.0.0.0 --port 5000
 ```
 
-Multiple workers (`--workers N`) are safe with the default `CHECKPOINT_BACKEND=postgres`, because both paused graph runs and pending MCP elicitation questions live in PostgreSQL. Run `python -m support_agents.db.init_db` after upgrading to create the new table. The API has no user authentication yet; see `docs/authentication.md` and keep it on a protected network.
+Multiple workers (`--workers N`) are safe with the default `CHECKPOINT_BACKEND=postgres`, because both paused graph runs and pending MCP elicitation questions live in PostgreSQL. Run `python -m support_agents.db.init_db` after upgrading to create the new table. Authentication is on by default and the server will not start without `AUTH_ISSUER` and `AUTH_CLIENT_ID`; see `docs/authentication.md` for the Cognito setup. For local development set `AUTH_ENABLED=false` in `.env` and keep the API off any network.
 
 ### Tests
 

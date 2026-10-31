@@ -37,6 +37,15 @@ class Settings(BaseSettings):
     langsmith_api_key: SecretStr | None = None
     langsmith_project: str = "customer-support-dev"
     langsmith_endpoint: str | None = None
+    # Authentication (Amazon Cognito access tokens by default; any OIDC-style JWT issuer works).
+    # Fail closed: with auth enabled the app refuses to start without an issuer and client ID.
+    auth_enabled: bool = True
+    auth_issuer: str | None = None  # https://cognito-idp.<region>.amazonaws.com/<pool-id>
+    auth_client_id: str | None = None  # app client ID the tokens were issued to
+    auth_jwks_url: str | None = None  # defaults to <issuer>/.well-known/jwks.json
+    auth_allowed_groups: str = "staff,admin"  # comma-separated; add "parent" for families
+    auth_admin_group: str = "admin"
+    auth_cognito_domain: str | None = None  # hosted login domain used by the browser UI
     checkpoint_backend: Literal["postgres", "memory"] = "postgres"
     mcp_transport: str = "stdio"
     mcp_host: str = "127.0.0.1"

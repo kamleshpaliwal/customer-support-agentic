@@ -88,18 +88,24 @@ def test_query_graph_failure_returns_502() -> None:
 
 
 def test_resume_validates_id_and_maps_failure_to_409() -> None:
+    request_id = str(uuid4())
     with _client(FakeGraph(RuntimeError("expired"))) as client:
         bad_id = client.post("/api/v1/query/not-a-uuid/resume", json={"answer": "x"})
         assert bad_id.status_code == 400
-        response = client.post(f"/api/v1/query/{uuid4()}/resume", json={"answer": "CBSE"})
+        # The failed query still claims the request id for this user.
+        client.post("/api/v1/query", json={"query": "fees?", "request_id": request_id})
+        response = client.post(f"/api/v1/query/{request_id}/resume", json={"answer": "CBSE"})
     assert response.status_code == 409
 
 
 def test_elicitation_endpoints() -> None:
-    request_id = uuid4()
-    with _client(FakeGraph({})) as client:
-        assert client.get(f"/api/v1/elicitation/{request_id}").json()["status"] == "waiting"
+    request_id = str(uuid4())
+    with _client(FakeGraph({"answer": "ok", "intent": "academic"})) as client:
         assert client.get("/api/v1/elicitation/bad").status_code == 400
+        # Unknown / unowned request ids look the same as missing ones.
+        assert client.get(f"/api/v1/elicitation/{request_id}").status_code == 404
+        client.post("/api/v1/query", json={"query": "fees?", "request_id": request_id})
+        assert client.get(f"/api/v1/elicitation/{request_id}").json()["status"] == "waiting"
         missing = client.post(
             f"/api/v1/elicitation/{request_id}/answer", json={"answer": "English"}
         )

@@ -6,19 +6,21 @@ import hmac
 import json
 import logging
 from contextlib import asynccontextmanager
-from typing import Literal, TypeVar
+from typing import Annotated, Literal, TypeVar
 from uuid import UUID, uuid4
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from langgraph.types import Command
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from support_agents.agents.academic_specialist import AcademicSpecialist
 from support_agents.agents.final_responder import create_final_responder
 from support_agents.agents.finance_specialist import FinanceSpecialist
 from support_agents.agents.supervisor import create_intent_detector
+from support_agents.auth import TokenVerifier, User, get_current_user
 from support_agents.checkpointer import close_checkpointer, create_checkpointer
 from support_agents.db.connection import create_pool
 from support_agents.db.ingest_academic_pdf import ingest_configured_pdf
@@ -29,11 +31,17 @@ from support_agents.mcp.elicitation import (
     PostgresElicitationBroker,
     set_elicitation_broker,
 )
+from support_agents.ownership import (
+    InMemoryRequestOwnership,
+    PostgresRequestOwnership,
+    RequestOwnership,
+)
 from support_agents.settings import PROJECT_ROOT, configure_langsmith_tracing, get_settings
 
 logger = logging.getLogger(__name__)
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
+CurrentUser = Annotated[User, Depends(get_current_user)]
 TEMPLATE_PATH = PROJECT_ROOT / "src" / "support_agents" / "templates" / "index.html"
 
 
@@ -145,10 +153,17 @@ def _query_response(result: dict, request_id: str) -> JSONResponse:
     )
 
 
-def create_app(*, graph=None, broker: ElicitationBroker | None = None) -> FastAPI:
+def create_app(
+    *,
+    graph=None,
+    broker: ElicitationBroker | None = None,
+    auth: TokenVerifier | None = None,
+    ownership: RequestOwnership | None = None,
+) -> FastAPI:
     """Create the app. Graph, checkpointer and broker are built on the server's event loop.
 
-    Passing ``graph`` (and optionally ``broker``) skips the real wiring, for tests.
+    Passing ``graph`` (and optionally ``broker``, ``auth``, ``ownership``) skips the real
+    wiring, for tests. Authentication is on in real wiring unless AUTH_ENABLED=false.
     """
 
     configure_langsmith_tracing()
@@ -160,13 +175,21 @@ def create_app(*, graph=None, broker: ElicitationBroker | None = None) -> FastAP
         if graph is not None:
             app.state.graph = graph
             app.state.broker = broker or InMemoryElicitationBroker()
+            app.state.auth = auth
+            app.state.ownership = ownership or InMemoryRequestOwnership()
         else:
+            settings = get_settings()
+            app.state.auth = (
+                TokenVerifier.from_settings(settings) if settings.auth_enabled else None
+            )
             checkpointer = await create_checkpointer()
             if get_settings().checkpoint_backend == "postgres":
                 pool = await create_pool()
                 app.state.broker = PostgresElicitationBroker(pool)
+                app.state.ownership = PostgresRequestOwnership(pool)
             else:
                 app.state.broker = InMemoryElicitationBroker()
+                app.state.ownership = InMemoryRequestOwnership()
             app.state.graph = build_support_graph(
                 GraphDependencies(
                     intent_detector=create_intent_detector(),
@@ -188,6 +211,29 @@ def create_app(*, graph=None, broker: ElicitationBroker | None = None) -> FastAP
     app = FastAPI(title="Customer Support Agent System", lifespan=lifespan)
     app.mount("/static", StaticFiles(directory=PROJECT_ROOT / "static"), name="static")
 
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error(_: Request, error: StarletteHTTPException):
+        # Keep the API's {"error": ...} shape for auth and routing errors.
+        return JSONResponse(
+            {"error": str(error.detail)}, status_code=error.status_code, headers=error.headers
+        )
+
+    async def require_owner(request_id: str, user: User) -> JSONResponse | None:
+        if not await app.state.ownership.is_owner(request_id, user.id):
+            return _error(404, "Request not found.", request_id=request_id)
+        return None
+
+    @app.get("/api/v1/auth/config")
+    async def auth_config():
+        """Public values the browser needs to start the hosted login flow."""
+        settings = get_settings()
+        enabled = app.state.auth is not None
+        return {
+            "enabled": enabled,
+            "client_id": settings.auth_client_id if enabled else None,
+            "cognito_domain": settings.auth_cognito_domain if enabled else None,
+        }
+
     @app.get("/")
     async def home():
         return FileResponse(TEMPLATE_PATH, media_type="text/html")
@@ -197,10 +243,12 @@ def create_app(*, graph=None, broker: ElicitationBroker | None = None) -> FastAP
         return {"status": "ok"}
 
     @app.get("/api/v1/elicitation/{request_id}")
-    async def get_pending_elicitation(request_id: str):
+    async def get_pending_elicitation(request_id: str, user: CurrentUser):
         request_id = _valid_uuid(request_id)
         if request_id is None:
             return _error(400, "Invalid request ID.")
+        if (denied := await require_owner(request_id, user)) is not None:
+            return denied
         pending = await app.state.broker.get_pending(request_id)
         if pending is None:
             return {"status": "waiting", "request_id": request_id}
@@ -213,10 +261,14 @@ def create_app(*, graph=None, broker: ElicitationBroker | None = None) -> FastAP
         }
 
     @app.post("/api/v1/elicitation/{request_id}/answer")
-    async def answer_mcp_elicitation(request_id: str, request: Request):
+    async def answer_mcp_elicitation(
+        request_id: str, request: Request, user: CurrentUser
+    ):
         request_id = _valid_uuid(request_id)
         if request_id is None:
             return _error(400, "Invalid request ID.")
+        if (denied := await require_owner(request_id, user)) is not None:
+            return denied
         payload = await _parse_body(
             request, ElicitationAnswerPayload, "Invalid elicitation answer.", request_id=request_id
         )
@@ -231,18 +283,27 @@ def create_app(*, graph=None, broker: ElicitationBroker | None = None) -> FastAP
         return {"status": result, "request_id": request_id}
 
     @app.post("/api/v1/academic/ingest")
-    async def ingest_academic_document(request: Request):
-        expected_key = get_settings().academic_ingest_api_key
-        if not expected_key:
-            return _error(503, "Document ingestion is disabled; configure ACADEMIC_INGEST_API_KEY.")
-
-        scheme, separator, supplied_key = request.headers.get("authorization", "").partition(" ")
-        if (
-            not separator
-            or scheme.lower() != "bearer"
-            or not hmac.compare_digest(supplied_key.strip(), expected_key)
-        ):
-            return _error(401, "A valid bearer token is required.")
+    async def ingest_academic_document(request: Request, user: CurrentUser):
+        if app.state.auth is not None:
+            # Authenticated deployments: only members of the admin group may ingest.
+            if not user.is_admin:
+                return _error(403, "Administrator access is required.")
+        else:
+            # Local development without an identity provider: shared bearer key.
+            expected_key = get_settings().academic_ingest_api_key
+            if not expected_key:
+                return _error(
+                    503, "Document ingestion is disabled; configure ACADEMIC_INGEST_API_KEY."
+                )
+            scheme, separator, supplied_key = request.headers.get("authorization", "").partition(
+                " "
+            )
+            if (
+                not separator
+                or scheme.lower() != "bearer"
+                or not hmac.compare_digest(supplied_key.strip(), expected_key)
+            ):
+                return _error(401, "A valid bearer token is required.")
 
         raw_body = await request.body()
         if raw_body and not request.headers.get("content-type", "").startswith("application/json"):
@@ -277,7 +338,7 @@ def create_app(*, graph=None, broker: ElicitationBroker | None = None) -> FastAP
         }
 
     @app.post("/api/v1/query")
-    async def submit_query(request: Request):
+    async def submit_query(request: Request, user: CurrentUser):
         payload = await _parse_body(
             request, QueryPayload, "Invalid request body.", request_id=str(uuid4())
         )
@@ -290,11 +351,16 @@ def create_app(*, graph=None, broker: ElicitationBroker | None = None) -> FastAP
         if not payload.query or not payload.user_id:
             return _error(400, "query and user_id must not be blank.", request_id=request_id)
 
+        if not await app.state.ownership.claim(request_id, user.id):
+            return _error(404, "Request not found.", request_id=request_id)
+        # With authentication on, identity comes from the verified token, never the body.
+        user_id = payload.user_id if app.state.auth is None else user.id
+
         try:
             result = await app.state.graph.ainvoke(
                 {
                     "request_id": request_id,
-                    "user_id": payload.user_id,
+                    "user_id": user_id,
                     "query": payload.query,
                     "allow_mcp_elicitation": browser_request_id,
                 },
@@ -310,10 +376,14 @@ def create_app(*, graph=None, broker: ElicitationBroker | None = None) -> FastAP
         return _query_response(result, request_id)
 
     @app.post("/api/v1/query/{request_id}/resume")
-    async def resume_query(request_id: str, request: Request):
+    async def resume_query(
+        request_id: str, request: Request, user: CurrentUser
+    ):
         request_id = _valid_uuid(request_id)
         if request_id is None:
             return _error(400, "Invalid request ID.")
+        if (denied := await require_owner(request_id, user)) is not None:
+            return denied
         payload = await _parse_body(
             request, ClarificationPayload, "Invalid clarification response.", request_id=request_id
         )

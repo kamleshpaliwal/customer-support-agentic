@@ -217,7 +217,7 @@ form.addEventListener("submit", async (event) => {
   responseCard.hidden = true;
   try {
     const requestId = crypto.randomUUID();
-    const queryPromise = fetch("/api/v1/query", {
+    const queryPromise = authFetch("/api/v1/query", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query, request_id: requestId }),
@@ -233,7 +233,7 @@ form.addEventListener("submit", async (event) => {
       if (queryResult !== null) break;
 
       try {
-        const elicitationResponse = await fetch(
+        const elicitationResponse = await authFetch(
           `/api/v1/elicitation/${encodeURIComponent(requestId)}`,
         );
         const elicitation = await elicitationResponse.json();
@@ -274,7 +274,7 @@ clarificationForm.addEventListener("submit", async (event) => {
   clarificationLabel.textContent = inputRequestKind === "mcp" ? "Sending…" : "Continuing…";
   try {
     if (inputRequestKind === "mcp") {
-      const response = await fetch(
+      const response = await authFetch(
         `/api/v1/elicitation/${encodeURIComponent(pendingRequestId)}/answer`,
         {
           method: "POST",
@@ -291,7 +291,7 @@ clarificationForm.addEventListener("submit", async (event) => {
       return;
     }
 
-    const response = await fetch(
+    const response = await authFetch(
       `/api/v1/query/${encodeURIComponent(pendingRequestId)}/resume`,
       {
         method: "POST",
