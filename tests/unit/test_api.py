@@ -127,3 +127,41 @@ def test_ingest_requires_configured_key(monkeypatch: pytest.MonkeyPatch) -> None
             json={"document_type": "other"},
         )
         assert bad_type.status_code == 400
+
+
+def test_ingest_passes_force_and_reports_incremental_counts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pathlib import Path
+
+    from support_agents.db.ingest_academic_pdf import IngestResult
+
+    calls: list[tuple[str, bool]] = []
+
+    async def fake_ingest(*, document_type: str, force: bool):
+        calls.append((document_type, force))
+        return Path("syllabus.pdf"), IngestResult(total=17, embedded=1, reused=16, removed=1)
+
+    monkeypatch.setattr("support_agents.api.get_settings", lambda: SimpleNamespace(
+        academic_ingest_api_key="secret"
+    ))
+    monkeypatch.setattr("support_agents.api.ingest_configured_pdf", fake_ingest)
+    headers = {"Authorization": "Bearer secret"}
+    with _client(FakeGraph({})) as client:
+        default = client.post("/api/v1/academic/ingest", headers=headers)
+        forced = client.post("/api/v1/academic/ingest", headers=headers, json={"force": True})
+        invalid = client.post("/api/v1/academic/ingest", headers=headers, json={"force": "x"})
+
+    assert default.status_code == 200
+    assert default.json() == {
+        "status": "completed",
+        "document_type": "syllabus",
+        "source_file": "syllabus.pdf",
+        "chunks_indexed": 17,
+        "chunks_embedded": 1,
+        "chunks_reused": 16,
+        "chunks_removed": 1,
+    }
+    assert calls == [("syllabus", False), ("syllabus", True)]
+    assert forced.status_code == 200
+    assert invalid.status_code == 400

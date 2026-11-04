@@ -22,7 +22,7 @@ LangGraph owns end-to-end orchestration. MCP provides the specialist tool interf
 - Ollama model adapters for local development and Bedrock adapters for supervisor routing and final response generation.
 - PostgreSQL fee schema, initializer, demo CSV seed importer, and read-only MCP `get_fees` tool.
 - Finance specialist calls the fee MCP tool; typed routing data carries board, standard, and academic year.
-- Academic PDFs can be ingested through a configured API endpoint into PostgreSQL/pgvector. Syllabus and book recommendation searches are exposed through MCP.
+- Academic PDFs can be ingested through a configured API endpoint into PostgreSQL/pgvector. Re-ingestion is incremental: only chunks whose text hash changed are re-embedded (`force` re-embeds all); re-ingestion still has to be triggered manually after a document changes. Syllabus and book recommendation searches are exposed through MCP.
 - Academic specialist uses LangChain `create_agent` to select from the approved academic search tools.
 - MCP elicitation can ask for a preferred book language. Finance board confirmation uses a LangGraph interrupt.
 - Query and ingestion request schemas, tool-result validation, selected retries/timeouts, and user-facing fallback responses.

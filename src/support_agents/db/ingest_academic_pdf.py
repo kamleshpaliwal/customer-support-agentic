@@ -10,9 +10,10 @@ import asyncio
 import hashlib
 import json
 import re
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from pypdf import PdfReader
 
@@ -160,12 +161,193 @@ def extract_chunks(pdf_path: Path, document_type: DocumentType = "syllabus") -> 
     raise ValueError(f"Unsupported academic document type: {document_type}")
 
 
-async def ingest(pdf_path: Path, document_type: DocumentType = "syllabus") -> int:
+def chunk_hash(content: str) -> str:
+    """Identity of a chunk's embedded text; matches the SQL backfill in migration 005."""
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+class ExistingChunk(NamedTuple):
+    id: int
+    content_hash: str | None
+    embedding_model: str
+
+
+@dataclass(frozen=True)
+class ChangePlan:
+    kept: list[tuple[int, int]]  # (existing row id, new chunk_index): vector is reused
+    inserts: list[int]  # new chunk_index values that need a row
+    to_embed: list[str]  # distinct texts that need a new vector
+    to_delete: list[int]  # existing row ids that no longer match any chunk
+
+
+@dataclass(frozen=True)
+class IngestResult:
+    total: int
+    embedded: int
+    reused: int
+    removed: int
+
+
+def plan_changes(
+    existing: list[ExistingChunk],
+    chunks: list[DocumentChunk],
+    model: str,
+    *,
+    force: bool = False,
+) -> ChangePlan:
+    """Match new chunks to stored rows by (text hash, embedding model).
+
+    Rows are consumed one per chunk, so repeated identical text is matched correctly.
+    A row embedded with a different model never matches, so a model change re-embeds all.
+    """
+    available: dict[str, list[int]] = defaultdict(list)
+    if not force:
+        for row in existing:
+            if row.embedding_model == model and row.content_hash:
+                available[row.content_hash.strip()].append(row.id)
+
+    kept: list[tuple[int, int]] = []
+    inserts: list[int] = []
+    for index, chunk in enumerate(chunks):
+        candidates = available.get(chunk_hash(chunk.content))
+        if candidates:
+            kept.append((candidates.pop(0), index))
+        else:
+            inserts.append(index)
+
+    kept_ids = {row_id for row_id, _ in kept}
+    return ChangePlan(
+        kept=kept,
+        inserts=inserts,
+        to_embed=list(dict.fromkeys(chunks[index].content for index in inserts)),
+        to_delete=[row.id for row in existing if row.id not in kept_ids],
+    )
+
+
+def chunk_metadata(
+    chunk: DocumentChunk, *, document_type: DocumentType, source_title: str, source_file: str
+) -> dict[str, object]:
+    return {
+        "document_type": document_type,
+        "source_title": source_title,
+        "source_file": source_file,
+        "page": chunk.page,
+        "page_end": chunk.page_end or chunk.page,
+        "standard": chunk.standard,
+        "subject": chunk.subject,
+        "academic_year": (
+            "general overview; not year-specific"
+            if document_type == "syllabus"
+            else "2026-2027; verify current school edition"
+        ),
+        **({"board": "CBSE-aligned"} if document_type == "syllabus" else {}),
+    }
+
+
+# Kept rows are first moved past any final index so renumbering cannot hit the
+# UNIQUE (source_id, chunk_index) constraint while rows swap places.
+_INDEX_PARK_OFFSET = 1_000_000
+
+
+async def ingest_chunks(
+    chunks: list[DocumentChunk],
+    *,
+    source_id: str,
+    document_type: DocumentType,
+    source_title: str,
+    source_file: str,
+    embedder,
+    pool,
+    force: bool = False,
+) -> IngestResult:
+    """Replace a source's chunks, re-embedding only chunks whose text changed.
+
+    Everything happens in one transaction under a per-source advisory lock, so searches see
+    either the old or the new set of chunks and concurrent ingests of one source take turns.
+    The lock (and one pooled connection) is held while the changed chunks are embedded.
+    """
+
+    def metadata_for(chunk: DocumentChunk) -> str:
+        return json.dumps(
+            chunk_metadata(
+                chunk,
+                document_type=document_type,
+                source_title=source_title,
+                source_file=source_file,
+            )
+        )
+
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            await connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", source_id
+            )
+            rows = await connection.fetch(
+                "SELECT id, content_hash, embedding_model FROM academic_documents "
+                "WHERE source_id = $1",
+                source_id,
+            )
+            plan = plan_changes(
+                [ExistingChunk(r["id"], r["content_hash"], r["embedding_model"]) for r in rows],
+                chunks,
+                embedder.model,
+                force=force,
+            )
+            vectors = await embedder.embed_many(plan.to_embed) if plan.to_embed else []
+            vector_by_text = dict(zip(plan.to_embed, vectors, strict=True))
+
+            if plan.to_delete:
+                await connection.execute(
+                    "DELETE FROM academic_documents WHERE id = ANY($1::bigint[])",
+                    plan.to_delete,
+                )
+            if plan.kept:
+                await connection.execute(
+                    "UPDATE academic_documents SET chunk_index = chunk_index + $2 "
+                    "WHERE id = ANY($1::bigint[])",
+                    [row_id for row_id, _ in plan.kept],
+                    _INDEX_PARK_OFFSET,
+                )
+                await connection.executemany(
+                    "UPDATE academic_documents SET chunk_index = $2, metadata = $3::jsonb "
+                    "WHERE id = $1",
+                    [
+                        (row_id, index, metadata_for(chunks[index]))
+                        for row_id, index in plan.kept
+                    ],
+                )
+            for index in plan.inserts:
+                chunk = chunks[index]
+                await connection.execute(
+                    """
+                    INSERT INTO academic_documents
+                        (source_id, chunk_index, content, metadata, embedding_model,
+                         embedding, content_hash)
+                    VALUES ($1, $2, $3, $4::jsonb, $5, $6::text::vector, $7)
+                    """,
+                    source_id,
+                    index,
+                    chunk.content,
+                    metadata_for(chunk),
+                    embedder.model,
+                    to_pgvector(vector_by_text[chunk.content]),
+                    chunk_hash(chunk.content),
+                )
+
+    return IngestResult(
+        total=len(chunks),
+        embedded=len(plan.to_embed),
+        reused=len(plan.kept),
+        removed=len(plan.to_delete),
+    )
+
+
+async def ingest(
+    pdf_path: Path, document_type: DocumentType = "syllabus", *, force: bool = False
+) -> IngestResult:
     if not pdf_path.is_file():
         raise FileNotFoundError(f"Academic PDF not found: {pdf_path}")
     chunks = extract_chunks(pdf_path, document_type)
-    embedder = OllamaEmbedder()
-    vectors = await embedder.embed_many([chunk.content for chunk in chunks])
     # Preserve the original syllabus source ID so a re-ingest replaces legacy
     # syllabus chunks instead of leaving duplicate rows behind.
     source_key = (
@@ -173,7 +355,6 @@ async def ingest(pdf_path: Path, document_type: DocumentType = "syllabus") -> in
         if document_type == "syllabus"
         else f"{document_type}:{pdf_path.resolve()}"
     )
-    source_id = hashlib.sha256(source_key.encode("utf-8")).hexdigest()
     source_title = (
         "Subjects taught in Standards 1 to 10"
         if document_type == "syllabus"
@@ -182,47 +363,18 @@ async def ingest(pdf_path: Path, document_type: DocumentType = "syllabus") -> in
 
     pool = await create_pool()
     try:
-        async with pool.acquire() as connection:
-            async with connection.transaction():
-                await connection.execute(
-                    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-                    source_id,
-                )
-                await connection.execute(
-                    "DELETE FROM academic_documents WHERE source_id = $1", source_id
-                )
-                for index, (chunk, vector) in enumerate(zip(chunks, vectors, strict=True)):
-                    metadata = {
-                        "document_type": document_type,
-                        "source_title": source_title,
-                        "source_file": pdf_path.name,
-                        "page": chunk.page,
-                        "page_end": chunk.page_end or chunk.page,
-                        "standard": chunk.standard,
-                        "subject": chunk.subject,
-                        "academic_year": (
-                            "general overview; not year-specific"
-                            if document_type == "syllabus"
-                            else "2026-2027; verify current school edition"
-                        ),
-                        **({"board": "CBSE-aligned"} if document_type == "syllabus" else {}),
-                    }
-                    await connection.execute(
-                        """
-                        INSERT INTO academic_documents
-                            (source_id, chunk_index, content, metadata, embedding_model, embedding)
-                        VALUES ($1, $2, $3, $4::jsonb, $5, $6::text::vector)
-                        """,
-                        source_id,
-                        index,
-                        chunk.content,
-                        json.dumps(metadata),
-                        embedder.model,
-                        to_pgvector(vector),
-                    )
+        return await ingest_chunks(
+            chunks,
+            source_id=hashlib.sha256(source_key.encode("utf-8")).hexdigest(),
+            document_type=document_type,
+            source_title=source_title,
+            source_file=pdf_path.name,
+            embedder=OllamaEmbedder(),
+            pool=pool,
+            force=force,
+        )
     finally:
         await pool.close()
-    return len(chunks)
 
 
 def configured_pdf_path(
@@ -242,11 +394,11 @@ def configured_pdf_path(
 
 
 async def ingest_configured_pdf(
-    document_type: DocumentType = "syllabus",
-) -> tuple[Path, int]:
+    document_type: DocumentType = "syllabus", *, force: bool = False
+) -> tuple[Path, IngestResult]:
     """Ingest the configured PDF selected by its academic document type."""
     pdf_path = configured_pdf_path(document_type)
-    return pdf_path, await ingest(pdf_path, document_type)
+    return pdf_path, await ingest(pdf_path, document_type, force=force)
 
 
 def main() -> None:
@@ -257,10 +409,16 @@ def main() -> None:
         type=Path,
         help="Optional PDF override; otherwise use ACADEMIC_DOCUMENT_PATH from .env.",
     )
+    parser.add_argument(
+        "--force", action="store_true", help="Re-embed every chunk instead of only changed ones."
+    )
     args = parser.parse_args()
     pdf_path = args.pdf or configured_pdf_path()
-    count = asyncio.run(ingest(pdf_path))
-    print(f"Indexed {count} chunks from {pdf_path}.")
+    result = asyncio.run(ingest(pdf_path, force=args.force))
+    print(
+        f"Indexed {result.total} chunks from {pdf_path}: {result.embedded} embedded, "
+        f"{result.reused} reused, {result.removed} removed."
+    )
 
 
 if __name__ == "__main__":

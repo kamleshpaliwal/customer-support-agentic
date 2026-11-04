@@ -95,6 +95,7 @@ class AcademicIngestPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     document_type: Literal["syllabus", "book_recommendations"] = "syllabus"
+    force: bool = False
 
 
 def _error(status: int, message: str, **extra) -> JSONResponse:
@@ -320,8 +321,8 @@ def create_app(
             return _error(400, "Invalid ingestion request.", details=None)
 
         try:
-            pdf_path, chunk_count = await ingest_configured_pdf(
-                document_type=payload.document_type
+            pdf_path, result = await ingest_configured_pdf(
+                document_type=payload.document_type, force=payload.force
             )
         except FileNotFoundError:
             logger.exception("Configured academic PDF was not found")
@@ -334,7 +335,10 @@ def create_app(
             "status": "completed",
             "document_type": payload.document_type,
             "source_file": pdf_path.name,
-            "chunks_indexed": chunk_count,
+            "chunks_indexed": result.total,
+            "chunks_embedded": result.embedded,
+            "chunks_reused": result.reused,
+            "chunks_removed": result.removed,
         }
 
     @app.post("/api/v1/query")
