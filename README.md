@@ -28,7 +28,7 @@ flowchart TD
 src/support_agents/
 ├── agents/     # supervisor, specialists, and final response agent
 ├── db/         # PostgreSQL access, migrations, initialization, and CSV import
-├── mcp/        # MCP client and fee lookup server
+├── mcp/        # MCP server, shared client session, elicitation broker
 ├── api.py      # FastAPI app (query, resume, elicitation, ingestion routes)
 ├── graph.py    # LangGraph workflow and routing edges
 ├── auth.py     # JWT verification and group authorization
@@ -197,10 +197,11 @@ The finance graph node accepts the validated `fee_lookup` produced by the superv
 
 The FastAPI app accepts a user query as JSON and passes it into the compiled LangGraph workflow. The graph runs intent detection first, routes finance requests through the finance specialist and MCP fee tool, and sends specialist results through the final responder.
 
-Install or refresh the project dependencies, then start the local API:
+Install or refresh the project dependencies, then start the local API. Authentication is on by default and the server refuses to start without an identity provider configured, so for local development put `AUTH_ENABLED=false` in `.env` (it is already set in `.env.example`) and see "Authentication" below for the real setup:
 
 ```bash
 python -m pip install -e .
+python -m support_agents.db.init_db   # creates/updates all tables; safe to repeat
 python -m support_agents.api
 ```
 
@@ -212,7 +213,7 @@ curl -X POST http://127.0.0.1:5000/api/v1/query \
   -d '{"query":"What is the tuition fee for CBSE class 1 in 2026-2027?"}'
 ```
 
-The `user_id` field is optional and defaults to `anonymous`. A completed response contains `request_id`, `status`, `answer`, `intent`, and `limitations`. If the supervisor needs more information, the API returns `status: "needs_input"`, a `question`, and the same `request_id`. Submit the user's reply to the resume endpoint:
+With `AUTH_ENABLED=false` the `user_id` field is optional and defaults to `anonymous`; with authentication on it is ignored and the user comes from the verified token (see below). A completed response contains `request_id`, `status`, `answer`, `intent`, and `limitations`. If the supervisor needs more information, the API returns `status: "needs_input"`, a `question`, and the same `request_id`. Submit the user's reply to the resume endpoint:
 
 ```bash
 REQUEST_ID='paste-the-request_id-from-the-previous-response'
@@ -220,6 +221,22 @@ curl -X POST "http://127.0.0.1:5000/api/v1/query/${REQUEST_ID}/resume" \
   -H 'Content-Type: application/json' \
   -d '{"answer":"2026-2027"}'
 ```
+
+### Authentication
+
+Sign-up and login are handled by the identity provider (Amazon Cognito by default); the API only verifies the access token it issues. With `AUTH_ENABLED=true` every `/api/v1/*` route except `/api/v1/auth/config` needs `Authorization: Bearer <access token>`:
+
+```bash
+curl -X POST http://127.0.0.1:5000/api/v1/query \
+  -H "Authorization: Bearer $ACCESS_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"query":"What is the tuition fee for DEMO-CBSE Class 5 in 2026-2027?"}'
+```
+
+- The token's signature, expiry, issuer and app client are checked (`AUTH_ISSUER`, `AUTH_CLIENT_ID`, optional `AUTH_JWKS_URL`); a missing or invalid token gets `401`.
+- Only users in `AUTH_ALLOWED_GROUPS` (default `staff,admin`, read from the `cognito:groups` claim) are allowed, others get `403`. Add `parent` to open it to families. Ingestion needs the `AUTH_ADMIN_GROUP` (default `admin`).
+- The user id comes from the token's `sub` claim, never from the request body, and each `request_id` is bound to the user who started it: another user resuming or answering it gets `404`.
+- The browser UI signs in through Cognito's hosted login page (`static/auth.js`, authorization code flow with PKCE; set `AUTH_COGNITO_DOMAIN`). This browser flow has not been tested against a real Cognito pool yet.
+- `/`, `/health` and `/static/*` stay public. Cognito pool setup and the known gaps are in `docs/authentication.md`.
 
 ### Paused sessions (checkpointing)
 
@@ -244,7 +261,7 @@ The per-user counts need the `rate_limits` table; run `python -m support_agents.
 uvicorn support_agents.api:create_app --factory --host 0.0.0.0 --port 5000
 ```
 
-Multiple workers (`--workers N`) are safe with the default `CHECKPOINT_BACKEND=postgres`, because both paused graph runs and pending MCP elicitation questions live in PostgreSQL. Run `python -m support_agents.db.init_db` after upgrading to create the new table. Authentication is on by default and the server will not start without `AUTH_ISSUER` and `AUTH_CLIENT_ID`; see `docs/authentication.md` for the Cognito setup. For local development set `AUTH_ENABLED=false` in `.env` and keep the API off any network.
+Multiple workers (`--workers N`) are safe with the default `CHECKPOINT_BACKEND=postgres`, because both paused graph runs and pending MCP elicitation questions live in PostgreSQL. Run `python -m support_agents.db.init_db` after upgrading: it applies the migrations that create the `pending_elicitations`, `request_owners` and `rate_limits` tables and add `content_hash` to the document chunks (the checkpoint tables are created automatically at startup). Authentication is on by default and the server will not start without `AUTH_ISSUER` and `AUTH_CLIENT_ID`; see `docs/authentication.md` for the Cognito setup. For local development set `AUTH_ENABLED=false` in `.env` and keep the API off any network.
 
 ### Tests
 
@@ -253,7 +270,7 @@ python -m pip install -e ".[dev]"
 python -m pytest tests -q
 ```
 
-Unit tests use fakes and need no services. `tests/integration/test_postgres_checkpointer.py` needs the Compose Postgres running and skips itself otherwise.
+`tests/unit` uses fakes and needs no services (JWT tests use a locally generated key). `tests/integration` runs against the Compose PostgreSQL and the real MCP server process (checkpointer, shared elicitation broker, request ownership, rate limit, incremental ingestion, persistent MCP session) and skips itself when Postgres is not reachable. Neither suite needs Ollama or AWS. Agent-quality checks are separate: `python evals/run_eval.py` (see `evals/README.md`).
 
 The Finance board-candidate confirmation uses a LangGraph interrupt. For academic book requests that omit language, the academic MCP tool uses MCP elicitation to ask the user to choose English or Hindi; the browser UI polls the pending elicitation endpoint while the original query request waits. The browser supplies a UUID `request_id` so the MCP client's elicitation callback can match the prompt to the browser. Direct API clients that want interactive elicitation must also provide a UUID and poll `/api/v1/elicitation/<request_id>`; submit a choice to `/api/v1/elicitation/<request_id>/answer`. With `CHECKPOINT_BACKEND=postgres` (the default) the pending question is stored in the `pending_elicitations` table (created by `python -m support_agents.db.init_db`), so the query and its poll/answer requests may be served by different workers; unanswered questions expire after 5 minutes. With `memory` the broker is in process memory and needs a single process. After initializing the schema, configure the PDF path and ingestion key, then call the ingestion endpoint before asking academic questions. `python -m support_agents.api` runs a single local uvicorn process. For deployment run `uvicorn support_agents.api:create_app --factory` (add `--workers N` to use more CPU cores; keep `CHECKPOINT_BACKEND=postgres` when you do) behind a protected network configuration.
 
