@@ -46,6 +46,12 @@ class Settings(BaseSettings):
     auth_allowed_groups: str = "staff,admin"  # comma-separated; add "parent" for families
     auth_admin_group: str = "admin"
     auth_cognito_domain: str | None = None  # hosted login domain used by the browser UI
+    # Overload protection. Per-user limits are shared by all workers; the model concurrency
+    # limit applies per process, so the total is model_max_concurrency x workers.
+    rate_limit_requests: int = Field(default=20, ge=0)  # per user per window; 0 disables
+    rate_limit_window_seconds: int = Field(default=60, ge=1)
+    model_max_concurrency: int = Field(default=4, ge=0)  # simultaneous model calls; 0 = no limit
+    model_queue_timeout_seconds: float = Field(default=10.0, gt=0)
     checkpoint_backend: Literal["postgres", "memory"] = "postgres"
     mcp_transport: str = "stdio"
     mcp_host: str = "127.0.0.1"

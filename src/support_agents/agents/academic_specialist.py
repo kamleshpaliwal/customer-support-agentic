@@ -14,6 +14,7 @@ from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 from langchain_ollama import ChatOllama
 
+from support_agents.limits import ServiceBusyError, get_model_limiter
 from support_agents.mcp.client import AcademicMCPClient, AcademicMCPClientError
 from support_agents.schemas import (
     AcademicSearchResult,
@@ -225,6 +226,23 @@ def _tool_search_results(agent_result: dict[str, object]) -> list[tuple[Academic
     return found
 
 
+class _LimitedChatOllama(ChatOllama):
+    """ChatOllama that waits for a shared model slot around each model call.
+
+    Only the model call holds a slot, not the whole agent run, because a run can wait on the
+    user (MCP elicitation) and must not block other users' model calls while it does.
+    """
+
+    async def _agenerate(self, *args, **kwargs):
+        async with get_model_limiter().slot():
+            return await super()._agenerate(*args, **kwargs)
+
+    async def _astream(self, *args, **kwargs):
+        async with get_model_limiter().slot():
+            async for chunk in super()._astream(*args, **kwargs):
+                yield chunk
+
+
 class AcademicSpecialist:
     """Use a LangChain tool-calling agent over the approved academic MCP searches."""
 
@@ -269,7 +287,7 @@ class AcademicSpecialist:
             """Search the indexed NCERT-first books by standard and subject."""
             return await timed_search(query, "book_recommendations")
 
-        model = ChatOllama(
+        model = _LimitedChatOllama(
             model=settings.academic_agent_ollama_model,
             base_url=settings.ollama_base_url,
             temperature=0,
@@ -299,6 +317,8 @@ class AcademicSpecialist:
                 {"messages": [{"role": "user", "content": query}]},
                 config={"recursion_limit": 8},
             )
+        except ServiceBusyError:
+            raise
         except AcademicMCPClientError as error:
             logger.exception("Academic MCP search failed")
             return SpecialistResult(

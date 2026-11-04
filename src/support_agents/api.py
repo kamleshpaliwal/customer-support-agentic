@@ -25,6 +25,12 @@ from support_agents.checkpointer import close_checkpointer, create_checkpointer
 from support_agents.db.connection import create_pool
 from support_agents.db.ingest_academic_pdf import ingest_configured_pdf
 from support_agents.graph import GraphDependencies, build_support_graph
+from support_agents.limits import (
+    InMemoryRateLimiter,
+    PostgresRateLimiter,
+    RateLimiter,
+    ServiceBusyError,
+)
 from support_agents.mcp.elicitation import (
     ElicitationBroker,
     InMemoryElicitationBroker,
@@ -160,11 +166,12 @@ def create_app(
     broker: ElicitationBroker | None = None,
     auth: TokenVerifier | None = None,
     ownership: RequestOwnership | None = None,
+    rate_limiter: RateLimiter | None = None,
 ) -> FastAPI:
     """Create the app. Graph, checkpointer and broker are built on the server's event loop.
 
-    Passing ``graph`` (and optionally ``broker``, ``auth``, ``ownership``) skips the real
-    wiring, for tests. Authentication is on in real wiring unless AUTH_ENABLED=false.
+    Passing ``graph`` (and optionally ``broker``, ``auth``, ``ownership``, ``rate_limiter``)
+    skips the real wiring, for tests. Authentication is on in real wiring unless AUTH_ENABLED=false.
     """
 
     configure_langsmith_tracing()
@@ -178,6 +185,7 @@ def create_app(
             app.state.broker = broker or InMemoryElicitationBroker()
             app.state.auth = auth
             app.state.ownership = ownership or InMemoryRequestOwnership()
+            app.state.rate_limiter = rate_limiter
         else:
             settings = get_settings()
             app.state.auth = (
@@ -191,6 +199,17 @@ def create_app(
             else:
                 app.state.broker = InMemoryElicitationBroker()
                 app.state.ownership = InMemoryRequestOwnership()
+            app.state.rate_limiter = None
+            if settings.rate_limit_requests > 0:
+                app.state.rate_limiter = (
+                    PostgresRateLimiter(
+                        pool, settings.rate_limit_requests, settings.rate_limit_window_seconds
+                    )
+                    if pool is not None
+                    else InMemoryRateLimiter(
+                        settings.rate_limit_requests, settings.rate_limit_window_seconds
+                    )
+                )
             app.state.graph = build_support_graph(
                 GraphDependencies(
                     intent_detector=create_intent_detector(),
@@ -223,6 +242,33 @@ def create_app(
         if not await app.state.ownership.is_owner(request_id, user.id):
             return _error(404, "Request not found.", request_id=request_id)
         return None
+
+    async def enforce_rate_limit(user: User) -> JSONResponse | None:
+        limiter: RateLimiter | None = app.state.rate_limiter
+        if limiter is None:
+            return None
+        decision = await limiter.check(user.id)
+        if decision.allowed:
+            return None
+        return JSONResponse(
+            {
+                "error": "You are sending requests too quickly. "
+                f"Please wait {decision.retry_after_seconds} seconds and try again.",
+                "retry_after_seconds": decision.retry_after_seconds,
+            },
+            status_code=429,
+            headers={"Retry-After": str(decision.retry_after_seconds)},
+        )
+
+    def busy_response(request_id: str) -> JSONResponse:
+        return JSONResponse(
+            {
+                "error": "The assistant is busy right now. Please try again in a few seconds.",
+                "request_id": request_id,
+            },
+            status_code=503,
+            headers={"Retry-After": "5"},
+        )
 
     @app.get("/api/v1/auth/config")
     async def auth_config():
@@ -355,6 +401,8 @@ def create_app(
         if not payload.query or not payload.user_id:
             return _error(400, "query and user_id must not be blank.", request_id=request_id)
 
+        if (limited := await enforce_rate_limit(user)) is not None:
+            return limited
         if not await app.state.ownership.claim(request_id, user.id):
             return _error(404, "Request not found.", request_id=request_id)
         # With authentication on, identity comes from the verified token, never the body.
@@ -370,6 +418,9 @@ def create_app(
                 },
                 config={"configurable": {"thread_id": request_id}},
             )
+        except ServiceBusyError:
+            logger.warning("Model backend busy; request_id=%s", request_id)
+            return busy_response(request_id)
         except Exception:
             logger.exception("Support graph request failed; request_id=%s", request_id)
             return _error(
@@ -395,12 +446,17 @@ def create_app(
             return payload
         if not payload.answer:
             return _error(400, "answer must not be blank.", request_id=request_id)
+        if (limited := await enforce_rate_limit(user)) is not None:
+            return limited
 
         try:
             result = await app.state.graph.ainvoke(
                 Command(resume=payload.answer),
                 config={"configurable": {"thread_id": request_id}},
             )
+        except ServiceBusyError:
+            logger.warning("Model backend busy on resume; request_id=%s", request_id)
+            return busy_response(request_id)
         except Exception:
             logger.exception("Could not resume support graph; request_id=%s", request_id)
             return _error(

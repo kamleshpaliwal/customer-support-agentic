@@ -165,3 +165,19 @@ def test_ingest_passes_force_and_reports_incremental_counts(
     assert calls == [("syllabus", False), ("syllabus", True)]
     assert forced.status_code == 200
     assert invalid.status_code == 400
+
+
+def test_busy_model_backend_returns_503_with_retry_after() -> None:
+    from support_agents.limits import ServiceBusyError
+
+    request_id = str(uuid4())
+    with _client(FakeGraph(ServiceBusyError("all slots busy"))) as client:
+        response = client.post(
+            "/api/v1/query", json={"query": "fees?", "request_id": request_id}
+        )
+        resumed = client.post(f"/api/v1/query/{request_id}/resume", json={"answer": "CBSE"})
+    for reply in (response, resumed):
+        assert reply.status_code == 503
+        assert reply.headers["retry-after"] == "5"
+        assert "busy" in reply.json()["error"]
+        assert "slots" not in reply.text

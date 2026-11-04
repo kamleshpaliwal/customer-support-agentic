@@ -58,7 +58,7 @@ local JWKS endpoint.
 ## Known gaps
 
 - `request_owners` rows are never deleted.
-- No rate limiting, so an authenticated user can still run up model costs.
+- Rate limiting is per user and per window (see the README, "Overload protection"); there is no spending cap, so budget alarms on the model account are still advisable.
 - No logout button or token refresh; users sign in again when the token expires (about an
   hour by default).
 - Tokens in `sessionStorage` are readable by any script on the page, so keep the page free

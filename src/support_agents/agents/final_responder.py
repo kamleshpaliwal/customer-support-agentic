@@ -13,6 +13,7 @@ from urllib.request import Request, urlopen
 import boto3
 from botocore.config import Config
 
+from support_agents.limits import get_model_limiter
 from support_agents.schemas import SpecialistResult
 from support_agents.settings import Settings, get_settings
 
@@ -310,7 +311,8 @@ class OllamaFinalResponder:
         if _uses_book_search(result):
             return result.answer.strip()
         try:
-            response = await asyncio.to_thread(self._render, query, result)
+            async with get_model_limiter().slot():
+                response = await asyncio.to_thread(self._render, query, result)
             if response and len(response) <= 4000:
                 return response
             LOGGER.warning("Ollama final responder returned empty or oversized text; using fallback.")
@@ -373,7 +375,8 @@ class BedrockFinalResponder:
         if _uses_book_search(result):
             return result.answer.strip()
         try:
-            response = await asyncio.to_thread(self._render, query, result)
+            async with get_model_limiter().slot():
+                response = await asyncio.to_thread(self._render, query, result)
             if response and len(response) <= 4000:
                 return response
             LOGGER.warning("Bedrock final responder returned empty or oversized text; using fallback.")

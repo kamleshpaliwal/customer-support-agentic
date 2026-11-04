@@ -14,6 +14,7 @@ from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from support_agents.limits import ServiceBusyError, get_model_limiter
 from support_agents.retry import retry
 from support_agents.schemas import FeeLookupRequest, Intent, IntentDecision
 from support_agents.settings import Settings, get_settings
@@ -171,9 +172,10 @@ class OllamaIntentDetector:
 
     async def detect(self, query: str) -> IntentDecision:
         try:
-            raw = await asyncio.to_thread(self._classify, query)
+            async with get_model_limiter().slot():
+                raw = await asyncio.to_thread(self._classify, query)
             extracted = _RoutingExtraction.model_validate(raw)
-        except IntentDetectionError:
+        except (IntentDetectionError, ServiceBusyError):
             raise
         except (ValidationError, json.JSONDecodeError) as error:
             raise IntentDetectionError("Ollama returned invalid routing fields.") from error
@@ -253,9 +255,10 @@ class BedrockIntentDetector:
     async def detect(self, query: str) -> IntentDecision:
         """Return a validated route, asking for missing fee fields when necessary."""
         try:
-            raw = await asyncio.to_thread(self._classify, query)
+            async with get_model_limiter().slot():
+                raw = await asyncio.to_thread(self._classify, query)
             extracted = _RoutingExtraction.model_validate(raw)
-        except IntentDetectionError:
+        except (IntentDetectionError, ServiceBusyError):
             raise
         except ValidationError as error:
             raise IntentDetectionError("Bedrock returned invalid routing fields.") from error

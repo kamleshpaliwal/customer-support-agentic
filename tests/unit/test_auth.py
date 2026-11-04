@@ -167,3 +167,22 @@ def test_app_refuses_to_start_without_auth_settings() -> None:
     settings = SimpleNamespace(auth_issuer=None, auth_client_id=None)
     with pytest.raises(ValueError, match="AUTH_ISSUER and AUTH_CLIENT_ID"):
         TokenVerifier.from_settings(settings)  # type: ignore[arg-type]
+
+
+def test_rate_limit_is_per_user_and_returns_retry_after(graph: FakeGraph) -> None:
+    from support_agents.limits import InMemoryRateLimiter
+
+    verifier = TokenVerifier(issuer=ISSUER, client_id=CLIENT_ID, key_provider=_key_provider)
+    limiter = InMemoryRateLimiter(limit=2, window_seconds=60)
+    with TestClient(create_app(graph=graph, auth=verifier, rate_limiter=limiter)) as client:
+        alice, bob = _token(sub="alice"), _token(sub="bob")
+        assert [_query(client, alice).status_code for _ in range(2)] == [200, 200]
+        limited = _query(client, alice)
+        assert limited.status_code == 429
+        assert int(limited.headers["retry-after"]) >= 1
+        assert limited.json()["retry_after_seconds"] >= 1
+        assert "error" in limited.json()
+        assert _query(client, bob).status_code == 200  # bob is unaffected
+        # Invalid requests do not consume quota.
+        assert _query(client, _token(sub="carol"), query="").status_code == 400
+        assert [_query(client, _token(sub="carol")).status_code for _ in range(2)] == [200, 200]

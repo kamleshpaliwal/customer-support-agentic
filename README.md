@@ -33,6 +33,7 @@ src/support_agents/
 ├── graph.py    # LangGraph workflow and routing edges
 ├── auth.py     # JWT verification and group authorization
 ├── ownership.py  # which user owns which request
+├── limits.py   # per-user rate limit and model concurrency limit
 ├── checkpointer.py  # PostgreSQL checkpointer for paused sessions
 ├── schemas.py  # shared request, decision, and result models
 └── settings.py # environment-backed configuration
@@ -223,6 +224,15 @@ curl -X POST "http://127.0.0.1:5000/api/v1/query/${REQUEST_ID}/resume" \
 ### Paused sessions (checkpointing)
 
 When a question needs clarification, the LangGraph run pauses and its state is saved so `POST /api/v1/query/<request_id>/resume` can continue it. By default (`CHECKPOINT_BACKEND=postgres`) the state is stored in the same PostgreSQL database as `DATABASE_URL`; the checkpoint tables are created automatically at startup. Paused sessions therefore survive a server restart and can be resumed by any process. Set `CHECKPOINT_BACKEND=memory` only for tests or throwaway single-process development, because those sessions (and pending elicitation questions) are lost on restart and not shared between workers.
+
+### Overload protection
+
+Two limits protect the model backend and the bill (settings in `.env.example`):
+
+- **Per-user rate limit** (`RATE_LIMIT_REQUESTS` per `RATE_LIMIT_WINDOW_SECONDS`, default 20 per 60 s; `0` disables). It counts `POST /api/v1/query` and `.../resume` for the authenticated user (requests that fail validation are not counted). Over the limit the API returns `429` with a `Retry-After` header. Counts live in the `rate_limits` table, so they are shared by all workers. It is a fixed window, so a user can briefly get up to twice the limit across a window boundary.
+- **Model concurrency limit** (`MODEL_MAX_CONCURRENCY`, default 4; `0` disables). At most that many model calls (supervisor, academic agent, final responder) run at once per process; others wait up to `MODEL_QUEUE_TIMEOUT_SECONDS` and then the request gets `503` with `Retry-After: 5`. The limit is per process, so total capacity is `MODEL_MAX_CONCURRENCY x workers`. Only the model call holds a slot, not a whole request, so a request waiting for the user's answer to a book-language question does not block others. If the final responder cannot get a slot, it falls back to the specialist's own text.
+
+The per-user counts need the `rate_limits` table; run `python -m support_agents.db.init_db` after upgrading (it applies migration `006`). Set `MODEL_MAX_CONCURRENCY` to what Ollama (`OLLAMA_NUM_PARALLEL`) or your Bedrock quota can really serve. Embedding calls made by the MCP server subprocess are not limited yet.
 
 ### Running the API in deployment
 
