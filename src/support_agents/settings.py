@@ -53,6 +53,8 @@ class Settings(BaseSettings):
     model_max_concurrency: int = Field(default=4, ge=0)  # simultaneous model calls; 0 = no limit
     model_queue_timeout_seconds: float = Field(default=10.0, gt=0)
     checkpoint_backend: Literal["postgres", "memory"] = "postgres"
+    # Keep one MCP server process per API process instead of starting one per tool call.
+    mcp_persistent_session: bool = True
     mcp_transport: str = "stdio"
     mcp_host: str = "127.0.0.1"
     mcp_port: int = Field(default=8000, ge=1, le=65535)

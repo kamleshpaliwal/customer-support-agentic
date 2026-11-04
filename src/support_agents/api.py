@@ -37,6 +37,7 @@ from support_agents.mcp.elicitation import (
     PostgresElicitationBroker,
     set_elicitation_broker,
 )
+from support_agents.mcp.session import get_mcp_session
 from support_agents.ownership import (
     InMemoryRequestOwnership,
     PostgresRequestOwnership,
@@ -220,9 +221,19 @@ def create_app(
                 checkpointer=checkpointer,
             )
         set_elicitation_broker(app.state.broker)
+        mcp_session = get_mcp_session() if graph is None else None
+        if mcp_session is not None:
+            try:
+                await mcp_session.start()  # pre-warm; a failure here is retried on first use
+            except Exception:
+                logger.warning(
+                    "Could not pre-start the MCP session; will retry lazily", exc_info=True
+                )
         try:
             yield
         finally:
+            if mcp_session is not None:
+                await mcp_session.close()
             if checkpointer is not None:
                 await close_checkpointer(checkpointer)
             if pool is not None:

@@ -225,6 +225,10 @@ curl -X POST "http://127.0.0.1:5000/api/v1/query/${REQUEST_ID}/resume" \
 
 When a question needs clarification, the LangGraph run pauses and its state is saved so `POST /api/v1/query/<request_id>/resume` can continue it. By default (`CHECKPOINT_BACKEND=postgres`) the state is stored in the same PostgreSQL database as `DATABASE_URL`; the checkpoint tables are created automatically at startup. Paused sessions therefore survive a server restart and can be resumed by any process. Set `CHECKPOINT_BACKEND=memory` only for tests or throwaway single-process development, because those sessions (and pending elicitation questions) are lost on restart and not shared between workers.
 
+### MCP connection
+
+The API starts one MCP server process (stdio) at startup and sends every fee and academic tool call over that single connection (`support_agents/mcp/session.py`), instead of starting a new process per call. A new process costs about 0.6-0.8 s (interpreter start, imports, DB pool) for a query that takes about 2 ms; on a warm session the fee lookup step takes roughly 10-30 ms. The session connects on first use if the startup pre-warm failed, reconnects and retries once if the server process dies (all tools are read-only), and is closed on shutdown. Elicitation prompts (the book-language question) are routed to the request that triggered them. There is one MCP process per API worker, each with its own database pool. Set `MCP_PERSISTENT_SESSION=false` to go back to one process per call, for example when debugging the server. Running the MCP server as a separate network service (`MCP_TRANSPORT=streamable-http`) is still a deployment decision; its authentication and network exposure are not handled yet.
+
 ### Overload protection
 
 Two limits protect the model backend and the bill (settings in `.env.example`):

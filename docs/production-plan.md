@@ -55,7 +55,7 @@ LangGraph owns end-to-end orchestration. MCP provides the specialist tool interf
 - Request, intent, specialist-result, and final-response schemas are implemented.
 - Local Ollama and Bedrock adapters for supervisor and final response are implemented.
 - Model-backed supervisor field extraction and typed routing are implemented.
-- MCP clients currently use local stdio connections. Add and operate a managed connection lifecycle for a long-running deployed graph runtime.
+- MCP clients share one long-lived local stdio connection per API process (started at app startup, reconnect-once on failure, closed on shutdown; `MCP_PERSISTENT_SESSION=false` restores per-call processes). Remaining: hosting the MCP server as its own service with authentication and network controls, and monitoring of the connection's health.
 - Keep production credentials and service identifiers in a managed secret store and configure least-privilege identities.
 
 ### 3. LangGraph workflow and specialist agents — development flow implemented; behavior verification pending
