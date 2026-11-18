@@ -10,6 +10,7 @@ from contextvars import ContextVar
 from typing import Literal
 
 from langchain.agents import create_agent
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 from langchain_ollama import ChatOllama
@@ -23,7 +24,7 @@ from support_agents.schemas import (
     SpecialistResult,
     ToolCallRecord,
 )
-from support_agents.settings import get_settings
+from support_agents.settings import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 _CURRENT_REQUEST_ID: ContextVar[str | None] = ContextVar("academic_request_id", default=None)
@@ -226,8 +227,8 @@ def _tool_search_results(agent_result: dict[str, object]) -> list[tuple[Academic
     return found
 
 
-class _LimitedChatOllama(ChatOllama):
-    """ChatOllama that waits for a shared model slot around each model call.
+class _ModelSlotMixin:
+    """Wait for a shared model slot around each model call, whichever provider serves it.
 
     Only the model call holds a slot, not the whole agent run, because a run can wait on the
     user (MCP elicitation) and must not block other users' model calls while it does.
@@ -241,6 +242,39 @@ class _LimitedChatOllama(ChatOllama):
         async with get_model_limiter().slot():
             async for chunk in super()._astream(*args, **kwargs):
                 yield chunk
+
+
+class _LimitedChatOllama(_ModelSlotMixin, ChatOllama):
+    pass
+
+
+def create_academic_chat_model(settings: Settings | None = None) -> BaseChatModel:
+    """Create the tool-calling chat model; local Ollama is the safe development default."""
+    active = settings or get_settings()
+    if active.academic_agent_provider == "ollama":
+        return _LimitedChatOllama(
+            model=active.academic_agent_ollama_model,
+            base_url=active.ollama_base_url,
+            temperature=0,
+        )
+
+    # Imported here so Ollama-only development never loads the AWS integration.
+    from botocore.config import Config
+    from langchain_aws import ChatBedrockConverse
+
+    class _LimitedChatBedrock(_ModelSlotMixin, ChatBedrockConverse):
+        pass
+
+    return _LimitedChatBedrock(
+        model=active.academic_agent_bedrock_model_id,
+        region_name=active.aws_region,
+        temperature=0,
+        config=Config(
+            connect_timeout=5,
+            read_timeout=60,
+            retries={"max_attempts": 2, "mode": "standard"},
+        ),
+    )
 
 
 class AcademicSpecialist:
@@ -287,13 +321,8 @@ class AcademicSpecialist:
             """Search the indexed NCERT-first books by standard and subject."""
             return await timed_search(query, "book_recommendations")
 
-        model = _LimitedChatOllama(
-            model=settings.academic_agent_ollama_model,
-            base_url=settings.ollama_base_url,
-            temperature=0,
-        )
         self.agent = create_agent(
-            model=model,
+            model=create_academic_chat_model(settings),
             tools=[search_syllabus, search_book_recommendations],
             system_prompt=ACADEMIC_AGENT_PROMPT,
         )

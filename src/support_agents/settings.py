@@ -29,7 +29,10 @@ class Settings(BaseSettings):
     academic_candidate_pool: int = Field(default=20, ge=1, le=100)
     academic_rerank_enabled: bool = False
     academic_reranker_model: str = "BAAI/bge-reranker-v2-m3"
+    academic_agent_provider: Literal["ollama", "bedrock"] = "ollama"
     academic_agent_ollama_model: str = "qwen3:4b-instruct"
+    # The academic agent calls tools, so the model must support tool use through Converse.
+    academic_agent_bedrock_model_id: str = "us.amazon.nova-lite-v1:0"
     aws_region: str = "us-east-1"
     supervisor_provider: Literal["ollama", "bedrock"] = "ollama"
     supervisor_ollama_model: str = "qwen3:4b-instruct"
