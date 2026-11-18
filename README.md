@@ -223,8 +223,10 @@ cp .env.ollama.example .env.ollama      # local models, local database
 cp .env.bedrock.example .env.bedrock    # Bedrock models, Titan-embedded database
 
 APP_PROFILE=ollama  python -m support_agents.api
-APP_PROFILE=bedrock python -m support_agents.api
+BEDROCK_CALLS_ENABLED=true APP_PROFILE=bedrock python -m support_agents.api
 ```
+
+**Bedrock calls need an explicit opt-in.** Every AWS client in the project is created in `aws.py`, and it refuses to create one unless the process was started with `BEDROCK_CALLS_ENABLED=true` (or `1`/`yes`) in the real environment. The variable is read from the process environment only, never from `.env` files, so the opt-in is per command and an edited file cannot switch it on. Without it, the Bedrock profile (and any `*_PROVIDER=bedrock`) fails fast with a clear error, and nothing can send a paid request by accident. The switch is forwarded to the MCP server process, which makes the embedding calls. Tests build clients around fake keys with the switch on, but `tests/conftest.py` makes any real AWS request fail.
 
 `.env.<profile>` is loaded after `.env`, so its values win; a real environment variable still beats both, and with no `APP_PROFILE` only `.env` is used. The same variable works for the ingest and eval commands, and the MCP server process receives it so it reads the same files. A profile holds the providers, `DATABASE_URL` and that setup's own connection and model settings (the Ollama URL and models in `.env.ollama`; the AWS region, keys, Bedrock model IDs and Titan settings in `.env.bedrock`) (a database holds one embedding model per document, so Bedrock needs its own ingested database). All Bedrock and AWS settings (region, model IDs, Titan and rerank settings, access keys) belong in `.env.bedrock`, and the shared `.env` should hold none of them. Don't leave empty `AWS_ACCESS_KEY_ID=` lines in a file that is loaded after the one holding the real key, because an empty value overrides it. Profile files are gitignored; only the `*.example` templates are committed.
 

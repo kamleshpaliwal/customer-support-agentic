@@ -98,10 +98,12 @@ def test_pgvector_accepts_any_dimension():
 def test_the_mcp_server_receives_aws_and_embedding_settings(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "/v2/credentials/abc")
     monkeypatch.setenv("EMBEDDING_PROVIDER", "bedrock")
+    monkeypatch.setenv("BEDROCK_CALLS_ENABLED", "true")
     monkeypatch.setenv("UNRELATED_SECRET", "nope")
     env = _server_parameters().env
     assert env["AWS_CONTAINER_CREDENTIALS_RELATIVE_URI"] == "/v2/credentials/abc"
     assert env["EMBEDDING_PROVIDER"] == "bedrock"
+    assert env["BEDROCK_CALLS_ENABLED"] == "true"
     assert "UNRELATED_SECRET" not in env
 
 

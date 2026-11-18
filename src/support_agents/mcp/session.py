@@ -37,7 +37,9 @@ logger = logging.getLogger(__name__)
 # AWS_* carries the role credentials a container platform provides (for example
 # AWS_CONTAINER_CREDENTIALS_RELATIVE_URI); the server needs them to call Bedrock.
 # APP_PROFILE selects the same .env.<profile> file in the server process.
-_FORWARDED_ENV_PREFIXES = ("ACADEMIC_", "OLLAMA_", "EMBEDDING_", "RERANK_", "AWS_", "APP_")
+_FORWARDED_ENV_PREFIXES = (
+    "ACADEMIC_", "OLLAMA_", "EMBEDDING_", "RERANK_", "AWS_", "APP_", "BEDROCK_"
+)
 
 # Which browser request an elicitation prompt belongs to; set by the caller of call_tool.
 _ELICITATION_REQUEST_ID: ContextVar[str | None] = ContextVar("elicitation_request_id", default=None)

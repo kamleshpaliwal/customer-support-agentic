@@ -105,3 +105,64 @@ def test_secrets_do_not_appear_in_the_printed_settings():
     printed = f"{active!r} {active}"
     assert "super-secret-value" not in printed
     assert "super-token-value" not in printed
+
+
+# ---------- the explicit opt-in
+
+def test_clients_are_refused_unless_calls_are_enabled(monkeypatch: pytest.MonkeyPatch):
+    from support_agents.aws import BedrockCallsDisabledError
+
+    monkeypatch.delenv("BEDROCK_CALLS_ENABLED", raising=False)
+    with pytest.raises(BedrockCallsDisabledError, match="BEDROCK_CALLS_ENABLED=true"):
+        create_bedrock_runtime_client(
+            settings(aws_access_key_id=EXPLICIT_KEY, aws_secret_access_key="secret")
+        )
+
+
+@pytest.mark.parametrize("value", ["", "false", "0", "no", "off", "maybe"])
+def test_only_true_like_values_enable_calls(monkeypatch: pytest.MonkeyPatch, value: str):
+    from support_agents.aws import bedrock_calls_enabled
+
+    monkeypatch.setenv("BEDROCK_CALLS_ENABLED", value)
+    assert bedrock_calls_enabled() is False
+
+
+@pytest.mark.parametrize("value", ["true", "TRUE", " 1 ", "yes"])
+def test_true_like_values_enable_calls(monkeypatch: pytest.MonkeyPatch, value: str):
+    from support_agents.aws import bedrock_calls_enabled
+
+    monkeypatch.setenv("BEDROCK_CALLS_ENABLED", value)
+    assert bedrock_calls_enabled() is True
+
+
+def test_the_switch_in_an_env_file_is_ignored(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    from support_agents.aws import BedrockCallsDisabledError
+
+    monkeypatch.delenv("BEDROCK_CALLS_ENABLED", raising=False)
+    env_file = tmp_path / ".env.bedrock"
+    env_file.write_text(
+        "BEDROCK_CALLS_ENABLED=true\nAWS_ACCESS_KEY_ID=AKIATESTKEY\nAWS_SECRET_ACCESS_KEY=s\n"
+    )
+    loaded = Settings(_env_file=env_file, database_url="postgresql://unused/unused")
+    with pytest.raises(BedrockCallsDisabledError):
+        create_bedrock_runtime_client(loaded)
+
+
+def test_the_guard_covers_every_service_the_helper_creates(monkeypatch: pytest.MonkeyPatch):
+    from support_agents.aws import BedrockCallsDisabledError, create_aws_client
+
+    monkeypatch.delenv("BEDROCK_CALLS_ENABLED", raising=False)
+    for service in ("bedrock-runtime", "bedrock-agent-runtime", "sts"):
+        with pytest.raises(BedrockCallsDisabledError):
+            create_aws_client(service, settings(aws_access_key_id=EXPLICIT_KEY, aws_secret_access_key="s"))
+
+
+def test_real_sends_are_blocked_in_tests():
+    client = create_bedrock_runtime_client(
+        settings(aws_access_key_id=EXPLICIT_KEY, aws_secret_access_key="secret")
+    )
+    with pytest.raises(Exception, match="real AWS request"):
+        client.converse(
+            modelId="us.amazon.nova-lite-v1:0",
+            messages=[{"role": "user", "content": [{"text": "x"}]}],
+        )

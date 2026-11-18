@@ -1,5 +1,10 @@
 """Create AWS (Bedrock) clients with explicit, intentional credentials.
 
+Every AWS client in the project is created here, and none is created unless the real environment
+variable ``BEDROCK_CALLS_ENABLED`` is ``true``. It is read from the process environment only,
+never from a ``.env`` file, so a paid call needs a deliberate per-command opt-in, for example
+``BEDROCK_CALLS_ENABLED=true APP_PROFILE=bedrock python -m support_agents.api``.
+
 ``boto3`` normally searches several places for credentials, and on a developer machine that
 search quietly finds whatever the AWS CLI is configured with. This module makes the choice
 visible: keys from the settings are used as-is, a role from the compute platform is accepted,
@@ -17,6 +22,18 @@ from support_agents.settings import Settings, get_settings
 
 # ``Credentials.method`` values that mean "static keys from the AWS CLI files".
 _CLI_FILE_METHODS = frozenset({"shared-credentials-file", "config-file"})
+
+
+ENABLE_VARIABLE = "BEDROCK_CALLS_ENABLED"
+
+
+class BedrockCallsDisabledError(RuntimeError):
+    """Raised when something tries to create an AWS client without the explicit opt-in."""
+
+
+def bedrock_calls_enabled() -> bool:
+    """True only when the process was started with ``BEDROCK_CALLS_ENABLED=true`` (or 1/yes)."""
+    return os.environ.get(ENABLE_VARIABLE, "").strip().lower() in {"1", "true", "yes"}
 
 
 class AwsCredentialsError(RuntimeError):
@@ -71,7 +88,13 @@ def create_aws_client(
     region_name: str | None = None,
     config: Any | None = None,
 ) -> Any:
-    """Return a client for ``service`` that follows the credential rules above."""
+    """Return a client for ``service`` that follows the rules above."""
+    if not bedrock_calls_enabled():
+        raise BedrockCallsDisabledError(
+            "AWS calls are disabled. Start this process with BEDROCK_CALLS_ENABLED=true in the "
+            "environment (it is ignored in .env files), for example "
+            "BEDROCK_CALLS_ENABLED=true APP_PROFILE=bedrock python -m support_agents.api"
+        )
     session = _build_session(settings or get_settings(), region_name)
     return session.client(service, config=config)
 
