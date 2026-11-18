@@ -47,7 +47,8 @@ def _build_session(settings: Settings, region_name: str | None) -> boto3.Session
     if credentials is None:
         raise AwsCredentialsError(
             "No AWS credentials found. For local development set AWS_ACCESS_KEY_ID and "
-            "AWS_SECRET_ACCESS_KEY in .env; in deployment attach an IAM role to the service."
+            "AWS_SECRET_ACCESS_KEY in .env.bedrock; in deployment attach an IAM role to the "
+            "service."
         )
     deliberate_profile = "AWS_PROFILE" in os.environ
     if (
@@ -57,8 +58,8 @@ def _build_session(settings: Settings, region_name: str | None) -> boto3.Session
     ):
         raise AwsCredentialsError(
             "Refusing to use the default AWS CLI credentials. Set AWS_ACCESS_KEY_ID and "
-            "AWS_SECRET_ACCESS_KEY in .env for this project, or set AWS_ALLOW_CLI_PROFILE=true "
-            "to use the CLI profile on purpose."
+            "AWS_SECRET_ACCESS_KEY in .env.bedrock for this project, or set "
+            "AWS_ALLOW_CLI_PROFILE=true to use the CLI profile on purpose."
         )
     return session
 

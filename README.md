@@ -226,13 +226,13 @@ APP_PROFILE=ollama  python -m support_agents.api
 APP_PROFILE=bedrock python -m support_agents.api
 ```
 
-`.env.<profile>` is loaded after `.env`, so its values win; a real environment variable still beats both, and with no `APP_PROFILE` only `.env` is used. The same variable works for the ingest and eval commands, and the MCP server process receives it so it reads the same files. A profile holds the providers and `DATABASE_URL` (a database holds one embedding model per document, so Bedrock needs its own ingested database). Don't put empty `AWS_ACCESS_KEY_ID=` lines in a profile file, because an empty value overrides the key in `.env`. Profile files are gitignored; only the `*.example` templates are committed.
+`.env.<profile>` is loaded after `.env`, so its values win; a real environment variable still beats both, and with no `APP_PROFILE` only `.env` is used. The same variable works for the ingest and eval commands, and the MCP server process receives it so it reads the same files. A profile holds the providers, `DATABASE_URL` and that setup's own connection and model settings (the Ollama URL and models in `.env.ollama`; the AWS region, keys, Bedrock model IDs and Titan settings in `.env.bedrock`) (a database holds one embedding model per document, so Bedrock needs its own ingested database). All Bedrock and AWS settings (region, model IDs, Titan and rerank settings, access keys) belong in `.env.bedrock`, and the shared `.env` should hold none of them. Don't leave empty `AWS_ACCESS_KEY_ID=` lines in a file that is loaded after the one holding the real key, because an empty value overrides it. Profile files are gitignored; only the `*.example` templates are committed.
 
 ### AWS credentials
 
 All Bedrock clients are created by `support_agents/aws.py`, which makes the credential choice explicit:
 
-- **Local development:** set `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in `.env` to the keys of a dedicated IAM user that may only call `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` on the models you use (see `docs/bedrock-iam-policy.json`). Those keys are used as-is, with no fallback.
+- **Local development:** set `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in **`.env.bedrock`** (not the shared `.env`, so Ollama-only runs never load them) to the keys of a dedicated IAM user that may only call `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` on the models you use (see `docs/bedrock-iam-policy.json`). Those keys are used as-is, with no fallback.
 - **Deployment:** leave both empty and attach an IAM role to the compute service (ECS task role, App Runner instance role, EC2 instance profile). The role's temporary credentials are found automatically, so no key or role name goes in `.env`.
 - **No accidental fallback:** with no keys, the app refuses to use the default AWS CLI credentials (`~/.aws/credentials`) and raises an error that says how to fix it. Setting `AWS_PROFILE` in the shell, or `AWS_ALLOW_CLI_PROFILE=true`, allows a CLI profile on purpose.
 - Setting only one of the two keys is an error, and the secret is never printed in logs or settings output.
