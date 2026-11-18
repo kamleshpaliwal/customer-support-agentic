@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import re
-from time import perf_counter
 from contextvars import ContextVar
+from time import perf_counter
 from typing import Literal
 
 from langchain.agents import create_agent
@@ -18,6 +18,7 @@ from langchain_ollama import ChatOllama
 from support_agents.limits import ServiceBusyError, get_model_limiter
 from support_agents.mcp.client import AcademicMCPClient, AcademicMCPClientError
 from support_agents.schemas import (
+    AcademicSearchMatch,
     AcademicSearchResult,
     Evidence,
     FeeLookupRequest,
@@ -114,9 +115,9 @@ def _to_specialist_result(
             return SpecialistResult(
                 specialist="academic",
                 answer=(
-                    "I could not find a sufficiently relevant book recommendation in the indexed guide. "
-                    "Please provide the standard, subject, and preferred language, or confirm the current "
-                    "book list with the school."
+                    "I could not find a sufficiently relevant book recommendation in the "
+                    "indexed guide. Please provide the standard, subject, and preferred "
+                    "language, or confirm the current book list with the school."
                 ),
                 limitations=[search.message],
                 needs_follow_up=True,
@@ -162,8 +163,8 @@ def _to_specialist_result(
             return SpecialistResult(
                 specialist="academic",
                 answer=(
-                    "I could not find a sufficiently relevant answer in the indexed academic subject guide. "
-                    "Please check with the school for the exact syllabus."
+                    "I could not find a sufficiently relevant answer in the indexed academic "
+                    "subject guide. Please check with the school for the exact syllabus."
                 ),
                 limitations=[search.message],
                 needs_follow_up=True,
@@ -173,7 +174,8 @@ def _to_specialist_result(
             "The guide does not define a school-specific or year-specific syllabus."
         )
         limitation = (
-            "The indexed PDF is a general overview; exact subjects and syllabus details vary by school and year."
+            "The indexed PDF is a general overview; exact subjects and syllabus details "
+            "vary by school and year."
         )
 
     evidence = []
@@ -201,7 +203,9 @@ def _to_specialist_result(
     )
 
 
-def _tool_search_results(agent_result: dict[str, object]) -> list[tuple[AcademicDocumentType, AcademicSearchResult]]:
+def _tool_search_results(
+    agent_result: dict[str, object],
+) -> list[tuple[AcademicDocumentType, AcademicSearchResult]]:
     """Read validated MCP results from the LangChain agent's tool messages."""
     messages = agent_result.get("messages", [])
     found: list[tuple[AcademicDocumentType, AcademicSearchResult]] = []
@@ -359,7 +363,10 @@ class AcademicSpecialist:
             logger.exception("Academic LangChain agent failed")
             return SpecialistResult(
                 specialist="academic",
-                answer="I could not process this academic question right now. Please try again later.",
+                answer=(
+                    "I could not process this academic question right now. "
+                    "Please try again later."
+                ),
                 limitations=[f"Academic agent error: {type(error).__name__}"],
             )
         finally:
