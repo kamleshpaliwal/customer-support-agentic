@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import re
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from urllib.request import Request, urlopen
 
@@ -189,10 +189,53 @@ _TOTAL_DETAIL = re.compile(
 )
 
 
+def _render_fee_listing(result: SpecialistResult) -> str | None:
+    """Render a fee list (by billing frequency) from MCP evidence, grouped by board and class."""
+    if not any(call.name == "list_fees_by_frequency" for call in result.tool_calls):
+        return None
+    groups: dict[tuple[str, str], dict[str, list[str]]] = {}
+    for evidence in result.evidence:
+        if evidence.source != "MCP list_fees_by_frequency":
+            continue
+        parts = [part.strip() for part in evidence.detail.split(" | ")]
+        if len(parts) != 6:
+            continue
+        board, standard, year, fee_type, amount, currency = parts
+        try:
+            formatted = f"{Decimal(amount):,.2f}"
+        except InvalidOperation:
+            continue
+        groups.setdefault((board, year), {}).setdefault(standard, []).append(
+            f"{fee_type.replace('_', ' ')} {formatted} {currency.upper()}"
+        )
+    if not groups:
+        return None
+
+    lines = [result.answer.strip(), ""]
+    for (board, year), standards in groups.items():
+        lines.append(f"{board}, {year}")
+        for standard, fees in standards.items():
+            lines.append(f"- {standard}: " + "; ".join(fees))
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
 def _render_verified_fee_answer(query: str, result: SpecialistResult) -> str | None:
     """Render found fee records directly from MCP evidence to preserve exact amounts."""
+    if (
+        result.specialist == "finance"
+        and not result.evidence
+        and not result.needs_follow_up
+        and any(call.name == "list_fees_by_frequency" for call in result.tool_calls)
+        and result.limitations
+    ):
+        # A fee list with no matches: say so directly instead of letting a model reword it.
+        return result.answer.strip()
     if result.specialist != "finance" or not result.evidence:
         return None
+    fee_listing = _render_fee_listing(result)
+    if fee_listing is not None:
+        return fee_listing
     fee_call = next((call for call in reversed(result.tool_calls) if call.name == "get_fees"), None)
     if fee_call is None:
         return None

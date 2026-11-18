@@ -14,7 +14,14 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
-from support_agents.schemas import FeeLookupRequest, Intent, IntentDecision, SpecialistResult
+from support_agents.schemas import (
+    ALL_BOARDS,
+    FeeListingRequest,
+    FeeLookupRequest,
+    Intent,
+    IntentDecision,
+    SpecialistResult,
+)
 
 
 class IntentDetector(Protocol):
@@ -29,6 +36,7 @@ class Specialist(Protocol):
         user_id: str,
         fee_lookup: FeeLookupRequest | None = None,
         request_id: str | None = None,
+        fee_listing: FeeListingRequest | None = None,
     ) -> SpecialistResult: ...
 
 
@@ -54,6 +62,7 @@ class SupportState(TypedDict, total=False):
     clarification_mode: str | None
     clarification_options: list[str]
     fee_lookup: FeeLookupRequest | None
+    fee_listing: FeeListingRequest | None
     specialist_result: SpecialistResult
     answer: str
     limitations: list[str]
@@ -76,6 +85,7 @@ def build_support_graph(dependencies: GraphDependencies, checkpointer=None):
             "intent": decision.intent,
             "clarification_question": decision.clarification_question,
             "fee_lookup": decision.fee_lookup,
+            "fee_listing": decision.fee_listing,
             "node_timings_ms": timings,
         }
 
@@ -86,6 +96,7 @@ def build_support_graph(dependencies: GraphDependencies, checkpointer=None):
             user_id=state["user_id"],
             fee_lookup=state.get("fee_lookup"),
             request_id=state.get("request_id"),
+            fee_listing=state.get("fee_listing"),
         )
         timings = dict(state.get("node_timings_ms", {}))
         timings["finance"] = round((perf_counter() - started) * 1000, 1)
@@ -100,7 +111,11 @@ def build_support_graph(dependencies: GraphDependencies, checkpointer=None):
             update.update(
                 {
                     "clarification_question": result.answer,
-                    "clarification_mode": "fee_board_selection",
+                    "clarification_mode": (
+                        "fee_listing_board_selection"
+                        if state.get("fee_listing") is not None
+                        else "fee_board_selection"
+                    ),
                     "clarification_options": result.follow_up_options,
                 }
             )
@@ -137,6 +152,40 @@ def build_support_graph(dependencies: GraphDependencies, checkpointer=None):
         )
         if not isinstance(answer, str) or not answer.strip():
             raise ValueError("A non-empty clarification answer is required to resume the graph.")
+
+        if mode == "fee_listing_board_selection":
+            listing = state.get("fee_listing")
+            selected = next(
+                (option for option in options if option.casefold() == answer.strip().casefold()),
+                None,
+            )
+            if selected is not None and listing is not None:
+                choice = {"all_boards": True} if selected == ALL_BOARDS else {"board": selected}
+                return Command(
+                    goto="finance",
+                    update={
+                        "fee_listing": listing.model_copy(update=choice),
+                        "clarification_question": None,
+                        "clarification_mode": None,
+                        "clarification_options": [],
+                    },
+                )
+            return Command(
+                goto="final_response",
+                update={
+                    "specialist_result": SpecialistResult(
+                        specialist="finance",
+                        answer=(
+                            "Understood. I cancelled the fee list. "
+                            "Ask again and choose a board when you are ready."
+                        ),
+                        limitations=["No fee list was produced because no board was chosen."],
+                    ),
+                    "clarification_question": None,
+                    "clarification_mode": None,
+                    "clarification_options": [],
+                },
+            )
 
         if mode == "fee_board_selection":
             selected_board = next(

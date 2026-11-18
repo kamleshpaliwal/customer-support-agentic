@@ -22,6 +22,7 @@ from support_agents.schemas import (
     AcademicSearchMatch,
     AcademicSearchResult,
     Evidence,
+    FeeListingRequest,
     FeeLookupRequest,
     SpecialistResult,
     ToolCallRecord,
@@ -343,8 +344,9 @@ class AcademicSpecialist:
         user_id: str,
         fee_lookup: FeeLookupRequest | None = None,
         request_id: str | None = None,
+        fee_listing: FeeListingRequest | None = None,
     ) -> SpecialistResult:
-        del user_id, fee_lookup
+        del user_id, fee_lookup, fee_listing
         request_id_token = _CURRENT_REQUEST_ID.set(request_id)
         user_query_token = _CURRENT_USER_QUERY.set(query)
         profile: dict[str, float] = {}

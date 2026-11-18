@@ -41,6 +41,7 @@ async def create_postgres_checkpointer(database_url: str):
             for name in (
                 "Intent",
                 "FeeLookupRequest",
+                "FeeListingRequest",
                 "Evidence",
                 "ToolCallRecord",
                 "SpecialistResult",

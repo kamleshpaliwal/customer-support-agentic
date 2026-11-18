@@ -140,7 +140,7 @@ function showClarification(data) {
     });
     clarificationOptions.append(button);
   }
-  if (data.kind === "fee_board_selection") {
+  if (data.kind === "fee_board_selection" || data.kind === "fee_listing_board_selection") {
     const cancel = document.createElement("button");
     cancel.className = "clarification-option";
     cancel.type = "button";

@@ -38,8 +38,9 @@ class FakeSpecialist:
         user_id: str,
         fee_lookup: object = None,
         request_id: str | None = None,
+        fee_listing: object = None,
     ) -> SpecialistResult:
-        del fee_lookup, request_id
+        del fee_lookup, request_id, fee_listing
         self.calls.append((query, user_id))
         return SpecialistResult(
             specialist=self.name,

@@ -44,11 +44,43 @@ class FeeLookupRequest(BaseModel):
         return value
 
 
+BillingFrequency = Literal["annual", "monthly", "quarterly", "term", "one_time"]
+ALL_BOARDS = "All boards"
+
+
+class FeeListingRequest(BaseModel):
+    """Ask which fees are charged with a given billing frequency (every filter is optional)."""
+
+    billing_frequency: BillingFrequency
+    board: str | None = Field(default=None, max_length=50)
+    standard: str | None = None
+    academic_year: str | None = Field(default=None, pattern=r"^[0-9]{4}-[0-9]{4}$")
+    all_boards: bool = False  # the user chose "All boards", so do not ask again
+
+    @field_validator("board", "standard", "academic_year", mode="before")
+    @classmethod
+    def blank_means_unspecified(cls, value: object) -> object:
+        if isinstance(value, str):
+            value = value.strip()
+        return value or None
+
+    @field_validator("standard")
+    @classmethod
+    def normalize_standard(cls, value: str | None) -> str | None:
+        return None if value is None else FeeLookupRequest.normalize_numeric_standard(value)
+
+    @field_validator("academic_year")
+    @classmethod
+    def consecutive_years(cls, value: str | None) -> str | None:
+        return None if value is None else FeeLookupRequest.require_consecutive_years(value)
+
+
 class IntentDecision(BaseModel):
     intent: Intent
     rationale: str = Field(description="Brief routing rationale; do not include hidden chain of thought.")
     clarification_question: str | None = None
     fee_lookup: FeeLookupRequest | None = None
+    fee_listing: FeeListingRequest | None = None
 
 
 class Evidence(BaseModel):
@@ -81,6 +113,27 @@ class FeeLookupResult(BaseModel):
     billing_frequency: str | None
     message: str
     board_candidates: list[str] = Field(default_factory=list)
+
+
+class FeeListItem(BaseModel):
+    board: str
+    standard: str
+    academic_year: str
+    fee_type: str
+    amount: str = Field(description="Exact monetary amount as a decimal string.")
+    currency: str
+
+
+class FeeListResult(BaseModel):
+    billing_frequency: BillingFrequency
+    items: list[FeeListItem] = Field(default_factory=list)
+    total_matches: int = 0
+    truncated: bool = False
+    boards: list[str] = Field(
+        default_factory=list,
+        description="Boards that have fees with this frequency under the other filters.",
+    )
+    message: str
 
 
 class AcademicSearchMatch(BaseModel):

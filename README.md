@@ -43,7 +43,16 @@ src/support_agents/
 
 ## Fee database and MCP server
 
-PostgreSQL stores structured `fees` records and academic PDF passages with pgvector embeddings. The MCP server exposes `get_fees` for exact fee lookups and `search_academic_documents` for semantic search over the indexed academic sources. Academic sources share one table and are separated by the `document_type` metadata value (`syllabus` or `book_recommendations`).
+PostgreSQL stores structured `fees` records and academic PDF passages with pgvector embeddings. The MCP server exposes `get_fees` for exact fee lookups, `list_fees_by_frequency` for fee lists, and `search_academic_documents` for semantic search over the indexed academic sources. Academic sources share one table and are separated by the `document_type` metadata value (`syllabus` or `book_recommendations`).
+
+### Listing fees by billing frequency
+
+A question such as "What fees are charged annually?" needs no board, class or year. The supervisor extracts a billing frequency (`annual`, `monthly`, `quarterly`, `term` or `one_time`), and the finance specialist calls the read-only `list_fees_by_frequency` tool:
+
+- If the question names a board, only that board is listed. Class and academic year narrow the list the same way.
+- If it names none and several boards have fees with that frequency, the app asks one question with the boards and **All boards** as options (`fee_listing_board_selection`, shown as buttons in the UI). Any other reply cancels the list.
+- The answer is rendered from the database rows (grouped by board and class, exact amounts), not reworded by a model. At most 50 records are returned; if there are more, the answer says how many were not shown and asks you to narrow by board, class or year.
+- A question that names board, class and academic year together is still a specific `get_fees` lookup, even if it mentions "annual".
 
 ### Run locally
 

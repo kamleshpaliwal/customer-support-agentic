@@ -6,6 +6,8 @@ from typing import Literal
 from support_agents.mcp.session import get_mcp_session
 from support_agents.schemas import (
     AcademicSearchResult,
+    FeeListingRequest,
+    FeeListResult,
     FeeLookupRequest,
     FeeLookupResult,
 )
@@ -42,6 +44,28 @@ class FeesMCPClient:
             raise
         except TimeoutError as error:
             raise FeeMCPClientError("The fee MCP request timed out.") from error
+        except Exception as error:
+            raise FeeMCPClientError("Could not connect to the fee MCP server.") from error
+
+
+    async def list_fees(self, request: FeeListingRequest) -> FeeListResult:
+        arguments = {"billing_frequency": request.billing_frequency}
+        for name in ("board", "standard", "academic_year"):
+            value = getattr(request, name)
+            if value is not None:
+                arguments[name] = value
+        try:
+            async with asyncio.timeout(self.timeout_seconds):
+                result = await get_mcp_session().call_tool("list_fees_by_frequency", arguments)
+            if result.is_error:
+                raise FeeMCPClientError("The fee listing MCP tool reported an error.")
+            if result.structured_content is None:
+                raise FeeMCPClientError("The fee listing MCP tool returned no structured result.")
+            return FeeListResult.model_validate(result.structured_content)
+        except FeeMCPClientError:
+            raise
+        except TimeoutError as error:
+            raise FeeMCPClientError("The fee listing MCP request timed out.") from error
         except Exception as error:
             raise FeeMCPClientError("Could not connect to the fee MCP server.") from error
 

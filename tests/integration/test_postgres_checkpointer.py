@@ -42,7 +42,9 @@ class _Detector:
 
 
 class _Specialist:
-    async def respond(self, query, *, user_id, fee_lookup=None, request_id=None):
+    async def respond(
+        self, query, *, user_id, fee_lookup=None, request_id=None, fee_listing=None
+    ):
         return SpecialistResult(specialist="finance", answer="unused")
 
 

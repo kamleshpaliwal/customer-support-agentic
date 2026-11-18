@@ -25,6 +25,8 @@ from support_agents.reranking import get_reranker
 from support_agents.retrieval import search_passages
 from support_agents.schemas import (
     AcademicSearchResult,
+    FeeListItem,
+    FeeListResult,
     FeeItem,
     FeeLookupResult,
 )
@@ -246,6 +248,83 @@ async def get_fees(
         currency=currency,
         billing_frequency=frequencies.pop(),
         message="Fee records found.",
+    )
+
+
+MAX_FEE_LIST_ROWS = 50
+
+
+@mcp.tool()
+async def list_fees_by_frequency(
+    billing_frequency: Annotated[
+        Literal["annual", "monthly", "quarterly", "term", "one_time"],
+        Field(description="How often the fee is charged."),
+    ],
+    ctx: Context,
+    board: Annotated[str | None, Field(max_length=50, description="Limit to one board.")] = None,
+    standard: Annotated[str | None, Field(max_length=30, description="Limit to one class.")] = None,
+    academic_year: Annotated[
+        str | None, Field(pattern=r"^[0-9]{4}-[0-9]{4}$", description="Limit to one year.")
+    ] = None,
+) -> FeeListResult:
+    """List fee records charged with the given billing frequency (read-only, capped)."""
+    normalized_board = board.strip() if board and board.strip() else None
+    normalized_standard = standard.strip() if standard and standard.strip() else None
+    if normalized_standard:
+        standard_match = _NUMERIC_STANDARD.fullmatch(normalized_standard)
+        if standard_match:
+            normalized_standard = f"Class {int(standard_match.group(1))}"
+
+    app_context = cast(AppContext, ctx.request_context.lifespan_context)
+    filters = """
+        WHERE billing_frequency = $1
+          AND ($2::text IS NULL OR lower(board) = lower($2))
+          AND ($3::text IS NULL OR lower(standard) = lower($3))
+          AND ($4::text IS NULL OR academic_year = $4)
+    """
+    args = (billing_frequency, normalized_board, normalized_standard, academic_year)
+    rows = await app_context.pool.fetch(
+        f"""
+        SELECT board, standard, academic_year, fee_type, amount, currency,
+               count(*) OVER () AS total
+        FROM fees {filters}
+        ORDER BY board,
+                 NULLIF(regexp_replace(standard, '[^0-9]', '', 'g'), '')::INTEGER NULLS LAST,
+                 standard, academic_year, fee_type
+        LIMIT {MAX_FEE_LIST_ROWS}
+        """,
+        *args,
+        timeout=10,
+    )
+    boards = [
+        row["board"]
+        for row in await app_context.pool.fetch(
+            f"SELECT DISTINCT board FROM fees {filters} ORDER BY board", *args, timeout=10
+        )
+    ]
+    total = rows[0]["total"] if rows else 0
+    label = billing_frequency.replace("_", " ")
+    return FeeListResult(
+        billing_frequency=billing_frequency,
+        items=[
+            FeeListItem(
+                board=row["board"],
+                standard=row["standard"],
+                academic_year=row["academic_year"],
+                fee_type=row["fee_type"],
+                amount=format(Decimal(row["amount"]), ".2f"),
+                currency=row["currency"].strip(),
+            )
+            for row in rows
+        ],
+        total_matches=total,
+        truncated=total > len(rows),
+        boards=boards,
+        message=(
+            f"Found {total} {label} fee records."
+            if total
+            else f"No {label} fee records were found for these filters."
+        ),
     )
 
 

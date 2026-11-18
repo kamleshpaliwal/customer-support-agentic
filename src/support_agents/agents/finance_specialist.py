@@ -4,7 +4,15 @@ import logging
 import re
 
 from support_agents.mcp.client import FeeMCPClientError, FeesMCPClient
-from support_agents.schemas import Evidence, FeeLookupRequest, SpecialistResult, ToolCallRecord
+from support_agents.schemas import (
+    ALL_BOARDS,
+    Evidence,
+    FeeListingRequest,
+    FeeListResult,
+    FeeLookupRequest,
+    SpecialistResult,
+    ToolCallRecord,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +30,11 @@ class FinanceSpecialist:
         user_id: str,
         fee_lookup: FeeLookupRequest | None = None,
         request_id: str | None = None,
+        fee_listing: FeeListingRequest | None = None,
     ) -> SpecialistResult:
         del user_id, request_id  # The structured lookup is produced by the supervisor.
+        if fee_listing is not None:
+            return await self._list_fees(fee_listing)
         if fee_lookup is None:
             return SpecialistResult(
                 specialist="finance",
@@ -127,3 +138,74 @@ class FinanceSpecialist:
             tool_calls=tool_calls,
             limitations=limitations,
         )
+
+    async def _list_fees(self, listing: FeeListingRequest) -> SpecialistResult:
+        """List fees by billing frequency; ask which board only when several could apply."""
+        label = listing.billing_frequency.replace("_", " ")
+        arguments = {
+            name: str(value)
+            for name, value in listing.model_dump().items()
+            if value not in (None, False)
+        }
+        tool_calls = [ToolCallRecord(name="list_fees_by_frequency", arguments=arguments)]
+        try:
+            result = await self.fees_client.list_fees(listing)
+        except FeeMCPClientError as error:
+            return SpecialistResult(
+                specialist="finance",
+                answer="I could not retrieve the fee records right now.",
+                tool_calls=tool_calls,
+                limitations=[str(error)],
+            )
+
+        if not result.items:
+            return SpecialistResult(
+                specialist="finance",
+                answer=result.message,
+                tool_calls=tool_calls,
+                limitations=[result.message],
+            )
+
+        if listing.board is None and not listing.all_boards and len(result.boards) > 1:
+            return SpecialistResult(
+                specialist="finance",
+                answer=f"Which board's {label} fees should I list?",
+                tool_calls=tool_calls,
+                needs_follow_up=True,
+                follow_up_options=[*result.boards, ALL_BOARDS],
+            )
+        return _listing_result(result, tool_calls)
+
+
+def _listing_result(result: FeeListResult, tool_calls: list[ToolCallRecord]) -> SpecialistResult:
+    label = result.billing_frequency.replace("_", " ")
+    shown = len(result.items)
+    answer = (
+        f"Showing {shown} of {result.total_matches} {label} fee records. "
+        "Name a board, class or academic year to narrow the list."
+        if result.truncated
+        else f"Found {result.total_matches} {label} fee records."
+    )
+    evidence = [
+        Evidence(
+            source="MCP list_fees_by_frequency",
+            detail=" | ".join(
+                (
+                    item.board,
+                    item.standard,
+                    item.academic_year,
+                    item.fee_type,
+                    item.amount,
+                    item.currency,
+                )
+            ),
+        )
+        for item in result.items
+    ]
+    return SpecialistResult(
+        specialist="finance",
+        answer=answer,
+        evidence=evidence,
+        tool_calls=tool_calls,
+        limitations=[answer] if result.truncated else [],
+    )
