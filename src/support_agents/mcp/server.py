@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from decimal import Decimal
+import logging
 import re
 from typing import Annotated, Literal, cast
 
@@ -19,7 +20,7 @@ from mcp.server.mcpserver import (
 from pydantic import BaseModel, Field
 
 from support_agents.db.connection import create_pool
-from support_agents.embeddings import OllamaEmbedder
+from support_agents.embeddings import Embedder, create_embedder
 from support_agents.reranking import get_reranker
 from support_agents.retrieval import search_passages
 from support_agents.schemas import (
@@ -28,6 +29,8 @@ from support_agents.schemas import (
     FeeLookupResult,
 )
 from support_agents.settings import get_settings
+
+logger = logging.getLogger(__name__)
 
 _NUMERIC_STANDARD = re.compile(
     r"(?:(?:class|standard|grade)\s*)?(\d{1,2})", re.IGNORECASE
@@ -61,7 +64,20 @@ def resolve_book_language(
 @dataclass
 class AppContext:
     pool: asyncpg.Pool
-    embedder: OllamaEmbedder
+    embedder: Embedder
+
+
+async def _warn_if_no_vectors_for(pool: asyncpg.Pool, model: str) -> None:
+    """Searches only match vectors from the configured model, so none stored means no answers."""
+    indexed = await pool.fetchval(
+        "SELECT count(*) FROM academic_documents WHERE embedding_model = $1", model
+    )
+    if indexed == 0:
+        logger.warning(
+            "No academic documents are indexed with embedding model %r; academic search will "
+            "find nothing until they are re-ingested with this model.",
+            model,
+        )
 
 
 @asynccontextmanager
@@ -71,7 +87,9 @@ async def server_lifespan(_: MCPServer) -> AsyncIterator[AppContext]:
         # Load the model now so the first search does not pay for it (or hit the tool timeout).
         await get_reranker().warm_up()
     try:
-        yield AppContext(pool=pool, embedder=OllamaEmbedder())
+        embedder = create_embedder()
+        await _warn_if_no_vectors_for(pool, embedder.model)
+        yield AppContext(pool=pool, embedder=embedder)
     finally:
         await pool.close()
 

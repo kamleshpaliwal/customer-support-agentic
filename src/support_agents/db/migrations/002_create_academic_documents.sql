@@ -15,8 +15,8 @@ CREATE TABLE IF NOT EXISTS academic_documents (
 ALTER TABLE academic_documents
     ADD COLUMN IF NOT EXISTS embedding_model TEXT NOT NULL DEFAULT '';
 
-CREATE INDEX IF NOT EXISTS academic_documents_embedding_hnsw_idx
-    ON academic_documents USING hnsw (embedding vector_cosine_ops);
+-- The vector index was removed in 008: it needs a fixed dimension, and 008 makes the column
+-- dimension-free so one schema can hold any embedding model.
 
 CREATE INDEX IF NOT EXISTS academic_documents_metadata_idx
     ON academic_documents USING gin (metadata);

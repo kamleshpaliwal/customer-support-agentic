@@ -18,7 +18,7 @@ from typing import Literal, NamedTuple
 from pypdf import PdfReader
 
 from support_agents.db.connection import create_pool
-from support_agents.embeddings import OllamaEmbedder, to_pgvector
+from support_agents.embeddings import create_embedder, to_pgvector
 from support_agents.settings import PROJECT_ROOT, Settings, get_settings
 
 
@@ -369,7 +369,7 @@ async def ingest(
             document_type=document_type,
             source_title=source_title,
             source_file=pdf_path.name,
-            embedder=OllamaEmbedder(),
+            embedder=create_embedder(),
             pool=pool,
             force=force,
         )

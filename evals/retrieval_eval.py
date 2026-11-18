@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from support_agents.db.connection import create_pool
-from support_agents.embeddings import OllamaEmbedder
+from support_agents.embeddings import Embedder, create_embedder
 from support_agents.reranking import get_reranker
 from support_agents.retrieval import search_passages
 from support_agents.schemas import AcademicSearchMatch
@@ -81,7 +81,7 @@ STRATEGIES = {
 
 
 async def run_strategy(
-    pool: Any, embedder: OllamaEmbedder, cases: list[dict[str, Any]], k: int, strategy: str
+    pool: Any, embedder: Embedder, cases: list[dict[str, Any]], k: int, strategy: str
 ) -> dict[str, Any]:
     mode, rerank = STRATEGIES[strategy]
     results = []
@@ -126,7 +126,7 @@ async def run_strategy(
 
 async def evaluate(k: int, strategies: list[str], dataset: Path) -> list[dict[str, Any]]:
     cases = load_cases(dataset)
-    embedder = OllamaEmbedder()
+    embedder = create_embedder()
     pool = await create_pool()
     try:
         reports = []
@@ -141,7 +141,7 @@ async def evaluate(k: int, strategies: list[str], dataset: Path) -> list[dict[st
 
 async def show_query(query: str, document_type: str, language: str | None, k: int) -> None:
     """Print the passages each strategy returns for one query, to see how the stages differ."""
-    embedder = OllamaEmbedder()
+    embedder = create_embedder()
     pool = await create_pool()
     try:
         for strategy, (mode, rerank) in STRATEGIES.items():

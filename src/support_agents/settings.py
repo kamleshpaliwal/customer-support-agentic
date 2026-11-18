@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     ollama_request_timeout_seconds: int = Field(default=300, ge=1, le=3600)
     ollama_embedding_model: str = "nomic-embed-text"
+    embedding_provider: Literal["ollama", "bedrock"] = "ollama"
+    embedding_bedrock_model_id: str = "amazon.titan-embed-text-v2:0"
+    # Titan V2 supports 256, 512 or 1024 dimensions.
+    embedding_bedrock_dimensions: int = 1024
     academic_document_path: Path = PROJECT_ROOT / "data" / "academic" / "subjects_standards_1_to_10.pdf"
     academic_book_recommendations_document_path: Path = (
         PROJECT_ROOT
@@ -29,11 +33,22 @@ class Settings(BaseSettings):
     academic_candidate_pool: int = Field(default=20, ge=1, le=100)
     academic_rerank_enabled: bool = False
     academic_reranker_model: str = "BAAI/bge-reranker-v2-m3"
+    # "local" runs the cross-encoder above in the MCP server; "bedrock" calls the Rerank API.
+    rerank_provider: Literal["local", "bedrock"] = "local"
+    rerank_bedrock_model_id: str = "amazon.rerank-v1:0"
+    # Rerank models are offered in only some regions (not us-east-1 for Amazon Rerank 1.0).
+    rerank_bedrock_region: str = "us-west-2"
     academic_agent_provider: Literal["ollama", "bedrock"] = "ollama"
     academic_agent_ollama_model: str = "qwen3:4b-instruct"
     # The academic agent calls tools, so the model must support tool use through Converse.
     academic_agent_bedrock_model_id: str = "us.amazon.nova-lite-v1:0"
     aws_region: str = "us-east-1"
+    # Local development only. Leave all three empty in deployment: the service's IAM role is used.
+    aws_access_key_id: str | None = None
+    aws_secret_access_key: SecretStr | None = None
+    aws_session_token: SecretStr | None = None
+    # Allow boto3 to fall back to the AWS CLI's default credentials (off by default).
+    aws_allow_cli_profile: bool = False
     supervisor_provider: Literal["ollama", "bedrock"] = "ollama"
     supervisor_ollama_model: str = "qwen3:4b-instruct"
     supervisor_bedrock_model_id: str = "us.amazon.nova-lite-v1:0"
@@ -65,6 +80,13 @@ class Settings(BaseSettings):
     mcp_transport: str = "stdio"
     mcp_host: str = "127.0.0.1"
     mcp_port: int = Field(default=8000, ge=1, le=65535)
+
+    @field_validator("embedding_bedrock_dimensions")
+    @classmethod
+    def _titan_dimensions(cls, value: int) -> int:
+        if value not in (256, 512, 1024):
+            raise ValueError("EMBEDDING_BEDROCK_DIMENSIONS must be 256, 512 or 1024.")
+        return value
 
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env",

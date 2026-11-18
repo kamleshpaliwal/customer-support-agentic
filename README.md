@@ -112,6 +112,17 @@ curl -X POST http://127.0.0.1:5000/api/v1/academic/ingest \\
 
 Configure `OLLAMA_EMBEDDING_MODEL`, `ACADEMIC_AGENT_OLLAMA_MODEL`, `ACADEMIC_DOCUMENT_PATH`, `ACADEMIC_BOOK_RECOMMENDATIONS_DOCUMENT_PATH`, `ACADEMIC_INGEST_API_KEY`, `ACADEMIC_SEARCH_TOP_K`, and `ACADEMIC_SEARCH_MIN_SIMILARITY` in `.env` (hybrid search and reranking are configured below). The configured embedding model must return 768 dimensions to match the vector column. Use the same embedding model for ingestion and queries. If the model changes, re-embed the documents and migrate the vector column before using them.
 
+### Embeddings: Ollama or Amazon Bedrock
+
+Query and document embeddings come from `create_embedder()` (`embeddings.py`), chosen by `EMBEDDING_PROVIDER`:
+
+- `ollama` (default): the local `OLLAMA_EMBEDDING_MODEL` (`nomic-embed-text`, 768 dimensions).
+- `bedrock`: Amazon Titan Text Embeddings V2 (`EMBEDDING_BEDROCK_MODEL_ID`, `EMBEDDING_BEDROCK_DIMENSIONS` = 256, 512 or 1024, default 1024). The IAM policy must allow `bedrock:InvokeModel` on the Titan model (`docs/bedrock-iam-policy.json`).
+
+Vectors from different models, or different sizes, are not comparable. Each row stores its `embedding_model` (for Bedrock it includes the size, for example `amazon.titan-embed-text-v2:0@1024`) and every search filters on the configured model, so rows from another model are ignored, never mixed. The `embedding` column is an untyped `vector` (migration `008`), so one schema serves a 768-dimension local database and a 1024-dimension Bedrock one; the vector index was dropped because it needs a fixed size, which is fine at this corpus size.
+
+**Switching model:** ingestion replaces a source's rows, so a database holds one model per document. Use a separate database per environment, or re-ingest after switching (`POST /api/v1/academic/ingest` with `"force": true`, or the ingest CLI). The MCP server warns at startup if nothing is indexed for the configured model, because academic search would otherwise find nothing. The MCP server process receives `AWS_*` and `EMBEDDING_*` variables, so role credentials on a container platform reach it.
+
 ### Retrieval: hybrid search and reranking
 
 Academic search (`src/support_agents/retrieval.py`) runs in stages, each switchable in `.env`:
@@ -126,7 +137,7 @@ ACADEMIC_RERANK_ENABLED=true            # needs: pip install -e '.[rerank]'
 ACADEMIC_RERANKER_MODEL=BAAI/bge-reranker-v2-m3
 ```
 
-The reranker model downloads on first use (about 2 GB) and loads when the MCP server starts (about 11 s); each search then costs about 1 s extra for a 17-candidate pool on a laptop; if it fails, search keeps the first-stage order. Postgres full-text ranking has no inverse document frequency (unlike BM25), so common words count as much as rare ones; see the retrieval notes in `evals/README.md`.
+By default (`RERANK_PROVIDER=local`) the reranker model downloads on first use (about 2 GB) and loads when the MCP server starts (about 11 s); each search then costs about 1 s extra for a 17-candidate pool on a laptop. With `RERANK_PROVIDER=bedrock` the Bedrock Rerank API scores the candidates instead (`RERANK_BEDROCK_MODEL_ID`, default `amazon.rerank-v1:0`), so no model or `torch` is needed on the server. Amazon Rerank 1.0 is not offered in `us-east-1`, so `RERANK_BEDROCK_REGION` (default `us-west-2`) is set separately and passages are sent to that region; the IAM policy needs `bedrock:Rerank` and `bedrock:InvokeModel` on the rerank model (`docs/bedrock-iam-policy.json`). If reranking fails, search keeps the first-stage order. New AWS accounts can have very low Rerank API quotas: on the development account, a handful of calls in quick succession were throttled (`ThrottlingException`), so check and raise the Rerank quotas in Service Quotas for the rerank region before relying on `RERANK_PROVIDER=bedrock`, and watch the log for `Reranking failed` lines, which mean search ran without reranking. Postgres full-text ranking has no inverse document frequency (unlike BM25), so common words count as much as rare ones; see the retrieval notes in `evals/README.md`.
 
 Compare strategies on the replayed eval cases (no LLM, seconds to run):
 
@@ -193,6 +204,15 @@ Supervisor and final response settings are independent. By default, `.env.exampl
 `OLLAMA_REQUEST_TIMEOUT_SECONDS` sets how long the app waits for each local model response (300 seconds by default). The supervisor does not retry a timed-out generation, since immediately repeating a slow inference can add more load. It does retry malformed JSON and transient connection errors.
 
 Choose the provider for each role independently with `SUPERVISOR_PROVIDER`, `ACADEMIC_AGENT_PROVIDER` and `FINAL_RESPONSE_PROVIDER`, each set to `ollama` (the local default) or `bedrock`. For Bedrock, configure `AWS_REGION`, `SUPERVISOR_BEDROCK_MODEL_ID`, `ACADEMIC_AGENT_BEDROCK_MODEL_ID`, and/or `FINAL_RESPONSE_BEDROCK_MODEL_ID`, and provide AWS credentials through the standard credential chain or an attached IAM role. All three Bedrock model IDs default to `us.amazon.nova-lite-v1:0`; the academic agent calls search tools, so its model must support tool use through the Converse API (Nova and Claude models do); model availability and pricing depend on the AWS account and region. Amazon lists the model and inference profile IDs in its [Nova Lite documentation](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-amazon-nova-lite.html).
+
+### AWS credentials
+
+All Bedrock clients are created by `support_agents/aws.py`, which makes the credential choice explicit:
+
+- **Local development:** set `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in `.env` to the keys of a dedicated IAM user that may only call `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` on the models you use (see `docs/bedrock-iam-policy.json`). Those keys are used as-is, with no fallback.
+- **Deployment:** leave both empty and attach an IAM role to the compute service (ECS task role, App Runner instance role, EC2 instance profile). The role's temporary credentials are found automatically, so no key or role name goes in `.env`.
+- **No accidental fallback:** with no keys, the app refuses to use the default AWS CLI credentials (`~/.aws/credentials`) and raises an error that says how to fix it. Setting `AWS_PROFILE` in the shell, or `AWS_ALLOW_CLI_PROFILE=true`, allows a CLI profile on purpose.
+- Setting only one of the two keys is an error, and the secret is never printed in logs or settings output.
 
 The academic agent's Bedrock model is a LangChain `ChatBedrockConverse` (`langchain-aws`) and shares the model concurrency limit with the other roles. Query and document embeddings and the optional reranker are still local; see `docs/production-plan.md`. For example, you can keep supervisor routing local while using Bedrock only for final wording by setting `SUPERVISOR_PROVIDER=ollama` and `FINAL_RESPONSE_PROVIDER=bedrock`.
 

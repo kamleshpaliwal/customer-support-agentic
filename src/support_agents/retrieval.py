@@ -17,7 +17,7 @@ from typing import Literal
 
 import asyncpg
 
-from support_agents.embeddings import OllamaEmbedder, to_pgvector
+from support_agents.embeddings import Embedder, to_pgvector
 from support_agents.reranking import Reranker, get_reranker
 from support_agents.schemas import AcademicSearchMatch
 from support_agents.settings import get_settings
@@ -231,7 +231,7 @@ def order_by_scores(
 
 async def search_passages(
     pool: asyncpg.Pool,
-    embedder: OllamaEmbedder,
+    embedder: Embedder,
     *,
     query: str,
     document_type: DocumentType,

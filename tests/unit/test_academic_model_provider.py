@@ -15,7 +15,13 @@ from support_agents.settings import Settings
 
 
 def _settings(**overrides) -> Settings:
-    return Settings(_env_file=None, database_url="postgresql://unused/unused", **overrides)
+    return Settings(
+        _env_file=None,
+        database_url="postgresql://unused/unused",
+        aws_access_key_id="AKIATESTKEY",
+        aws_secret_access_key="test-secret",
+        **overrides,
+    )
 
 
 def test_ollama_is_the_default_provider():

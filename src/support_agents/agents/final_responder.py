@@ -10,13 +10,12 @@ from decimal import Decimal
 from typing import Any
 from urllib.request import Request, urlopen
 
-import boto3
 from botocore.config import Config
 
+from support_agents.aws import create_bedrock_runtime_client
 from support_agents.limits import get_model_limiter
 from support_agents.schemas import SpecialistResult
 from support_agents.settings import Settings, get_settings
-
 
 LOGGER = logging.getLogger(__name__)
 
@@ -355,9 +354,9 @@ class BedrockFinalResponder:
     ) -> None:
         settings = get_settings()
         self.model_id = model_id or settings.final_response_bedrock_model_id
-        self._client = bedrock_client or boto3.client(
-            "bedrock-runtime",
-            region_name=region_name or settings.aws_region,
+        self._client = bedrock_client or create_bedrock_runtime_client(
+            settings,
+            region_name=region_name,
             config=Config(
                 connect_timeout=5,
                 read_timeout=30,

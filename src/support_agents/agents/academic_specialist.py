@@ -15,6 +15,7 @@ from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 from langchain_ollama import ChatOllama
 
+from support_agents.aws import create_bedrock_runtime_client
 from support_agents.limits import ServiceBusyError, get_model_limiter
 from support_agents.mcp.client import AcademicMCPClient, AcademicMCPClientError
 from support_agents.schemas import (
@@ -269,15 +270,19 @@ def create_academic_chat_model(settings: Settings | None = None) -> BaseChatMode
     class _LimitedChatBedrock(_ModelSlotMixin, ChatBedrockConverse):
         pass
 
-    return _LimitedChatBedrock(
-        model=active.academic_agent_bedrock_model_id,
-        region_name=active.aws_region,
-        temperature=0,
+    client = create_bedrock_runtime_client(
+        active,
         config=Config(
             connect_timeout=5,
             read_timeout=60,
             retries={"max_attempts": 2, "mode": "standard"},
         ),
+    )
+    return _LimitedChatBedrock(
+        model=active.academic_agent_bedrock_model_id,
+        client=client,
+        region_name=active.aws_region,
+        temperature=0,
     )
 
 
