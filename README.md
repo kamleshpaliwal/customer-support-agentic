@@ -205,6 +205,20 @@ Supervisor and final response settings are independent. By default, `.env.exampl
 
 Choose the provider for each role independently with `SUPERVISOR_PROVIDER`, `ACADEMIC_AGENT_PROVIDER` and `FINAL_RESPONSE_PROVIDER`, each set to `ollama` (the local default) or `bedrock`. For Bedrock, configure `AWS_REGION`, `SUPERVISOR_BEDROCK_MODEL_ID`, `ACADEMIC_AGENT_BEDROCK_MODEL_ID`, and/or `FINAL_RESPONSE_BEDROCK_MODEL_ID`, and provide AWS credentials through the standard credential chain or an attached IAM role. All three Bedrock model IDs default to `us.amazon.nova-lite-v1:0`; the academic agent calls search tools, so its model must support tool use through the Converse API (Nova and Claude models do); model availability and pricing depend on the AWS account and region. Amazon lists the model and inference profile IDs in its [Nova Lite documentation](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-amazon-nova-lite.html).
 
+### Switching between Ollama and Bedrock (profiles)
+
+`.env` is the shared base. Keep the settings that differ between setups in small profile files and pick one at start-up with `APP_PROFILE`:
+
+```bash
+cp .env.ollama.example .env.ollama      # local models, local database
+cp .env.bedrock.example .env.bedrock    # Bedrock models, Titan-embedded database
+
+APP_PROFILE=ollama  python -m support_agents.api
+APP_PROFILE=bedrock python -m support_agents.api
+```
+
+`.env.<profile>` is loaded after `.env`, so its values win; a real environment variable still beats both, and with no `APP_PROFILE` only `.env` is used. The same variable works for the ingest and eval commands, and the MCP server process receives it so it reads the same files. A profile holds the providers and `DATABASE_URL` (a database holds one embedding model per document, so Bedrock needs its own ingested database). Don't put empty `AWS_ACCESS_KEY_ID=` lines in a profile file, because an empty value overrides the key in `.env`. Profile files are gitignored; only the `*.example` templates are committed.
+
 ### AWS credentials
 
 All Bedrock clients are created by `support_agents/aws.py`, which makes the credential choice explicit:

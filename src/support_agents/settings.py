@@ -1,5 +1,6 @@
 """Environment-backed runtime settings."""
 
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -8,6 +9,19 @@ from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def env_files(profile: str | None, root: Path = PROJECT_ROOT) -> tuple[Path, ...]:
+    """``.env`` first, then ``.env.<profile>``; later files override earlier ones.
+
+    ``APP_PROFILE=bedrock`` keeps the differences between setups (providers, database, AWS keys)
+    in one small file per setup instead of editing ``.env`` each time you switch.
+    """
+    if not profile:
+        return (root / ".env",)
+    if not profile.replace("-", "").replace("_", "").isalnum():
+        raise ValueError("APP_PROFILE may contain only letters, digits, '-' and '_'.")
+    return (root / ".env", root / f".env.{profile}")
 
 
 class Settings(BaseSettings):
@@ -89,7 +103,7 @@ class Settings(BaseSettings):
         return value
 
     model_config = SettingsConfigDict(
-        env_file=PROJECT_ROOT / ".env",
+        env_file=env_files(os.environ.get("APP_PROFILE")),
         env_file_encoding="utf-8",
         extra="ignore",
     )
