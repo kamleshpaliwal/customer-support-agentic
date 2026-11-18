@@ -19,9 +19,10 @@ from mcp.server.mcpserver import (
 from pydantic import BaseModel, Field
 
 from support_agents.db.connection import create_pool
-from support_agents.embeddings import OllamaEmbedder, to_pgvector
+from support_agents.embeddings import OllamaEmbedder
+from support_agents.reranking import get_reranker
+from support_agents.retrieval import search_passages
 from support_agents.schemas import (
-    AcademicSearchMatch,
     AcademicSearchResult,
     FeeItem,
     FeeLookupResult,
@@ -32,47 +33,6 @@ _NUMERIC_STANDARD = re.compile(
     r"(?:(?:class|standard|grade)\s*)?(\d{1,2})", re.IGNORECASE
 )
 _BOOK_LANGUAGE = re.compile(r"\b(english|hindi)\b", re.IGNORECASE)
-_REQUESTED_STANDARD = re.compile(r"\b(?:standard|class|grade)\s*(10|[1-9])\b", re.IGNORECASE)
-_SUBJECT_ALIASES = (
-    ("Integrated world learning", ("integrated world learning", "world around us")),
-    ("Environmental studies", ("environmental studies", "environmental science", "evs")),
-    ("Social science", ("social science", "social studies")),
-    ("Arts and wellbeing", ("arts and wellbeing", "arts and well-being", "art")),
-    ("Mathematics", ("mathematics", "maths", "math")),
-    ("Science", ("science",)),
-    ("English", ("english",)),
-    ("Hindi", ("hindi",)),
-)
-
-
-def _requested_book_filters(query: str) -> tuple[str | None, str | None]:
-    """Extract explicit grade/subject filters to keep book retrieval on-record."""
-    grade_match = _REQUESTED_STANDARD.search(query)
-    standard = f"Standard {int(grade_match.group(1))}" if grade_match else None
-
-    # In phrases such as “Science book in English”, English is the requested
-    # edition language, not the subject record to retrieve.
-    subject_query = re.sub(
-        r"\b(?:in|language|medium)\s+(english|hindi)\b", " ", query, flags=re.IGNORECASE
-    )
-    subject = None
-    for canonical, aliases in _SUBJECT_ALIASES:
-        if any(re.search(rf"\b{re.escape(alias)}\b", subject_query, re.IGNORECASE) for alias in aliases):
-            subject = canonical
-            break
-    return standard, subject
-
-
-def _is_exact_syllabus_scope_query(query: str) -> bool:
-    """Recognize requests the indexed guide explicitly says it cannot define."""
-    normalized = query.casefold()
-    asks_for_syllabus = "syllabus" in normalized or "curriculum" in normalized
-    asks_for_exact_scope = (
-        ("school" in normalized and any(term in normalized for term in ("exact", "specific")))
-        or "chapter-by-chapter" in normalized
-        or ("official" in normalized and re.search(r"20\d{2}\s*[-–]\s*20\d{2}", normalized) is not None)
-    )
-    return asks_for_syllabus and asks_for_exact_scope
 
 
 class BookLanguageChoice(BaseModel):
@@ -107,6 +67,9 @@ class AppContext:
 @asynccontextmanager
 async def server_lifespan(_: MCPServer) -> AsyncIterator[AppContext]:
     pool = await create_pool()
+    if get_settings().academic_rerank_enabled:
+        # Load the model now so the first search does not pay for it (or hit the tool timeout).
+        await get_reranker().warm_up()
     try:
         yield AppContext(pool=pool, embedder=OllamaEmbedder())
     finally:
@@ -300,71 +263,15 @@ async def search_academic_documents(
     if not normalized_query:
         return AcademicSearchResult(matches=[], message="Search query must not be blank.")
 
-    settings = get_settings()
     app_context = cast(AppContext, ctx.request_context.lifespan_context)
-    search_query = normalized_query
-    scope_query = document_type == "syllabus" and _is_exact_syllabus_scope_query(
-        normalized_query
+    matches = await search_passages(
+        app_context.pool,
+        app_context.embedder,
+        query=normalized_query,
+        document_type=document_type,
+        language=selected_language,
+        limit=limit,
     )
-    if scope_query:
-        # Surface the guide's explicit scope caveat instead of ranking a grade's
-        # subject list above the answer to an exact/school-specific syllabus ask.
-        search_query += (
-            " The source is a broad overview, not an official year-specific syllabus; "
-            "it cannot establish the exact syllabus for a particular school."
-        )
-    if selected_language:
-        search_query = f"{normalized_query}\nRequested book language: {selected_language}."
-    vector = to_pgvector(await app_context.embedder.embed(search_query))
-    requested_standard, requested_subject = (
-        _requested_book_filters(normalized_query)
-        if document_type == "book_recommendations"
-        else (None, None)
-    )
-    rows = await app_context.pool.fetch(
-        """
-        SELECT content,
-               metadata->>'source_title' AS source,
-               NULLIF(metadata->>'page', '')::INTEGER AS page,
-               NULLIF(metadata->>'page_end', '')::INTEGER AS page_end,
-               metadata->>'standard' AS standard,
-               metadata->>'subject' AS subject,
-               1 - (embedding <=> $1::text::vector) AS similarity_score
-        FROM academic_documents
-        WHERE embedding_model = $2
-          AND COALESCE(metadata->>'document_type', 'syllabus') = $3
-          AND ($5::text IS NULL OR metadata->>'standard' = $5)
-          AND ($6::text IS NULL OR lower(metadata->>'subject') = lower($6))
-          AND (
-                NOT $7::boolean
-                OR content ILIKE '%not an official year-specific syllabus%'
-                OR content ILIKE '%cannot establish the exact subjects or syllabus for a particular school%'
-              )
-        ORDER BY embedding <=> $1::text::vector
-        LIMIT $4
-        """,
-        vector,
-        app_context.embedder.model,
-        document_type,
-        limit,
-        requested_standard,
-        requested_subject,
-        scope_query,
-        timeout=10,
-    )
-    matches = [
-        AcademicSearchMatch(
-            content=row["content"],
-            source=row["source"] or "Academic subject guide",
-            page=row["page"],
-            page_end=row["page_end"],
-            standard=row["standard"],
-            subject=row["subject"],
-            similarity_score=min(1.0, max(-1.0, float(row["similarity_score"]))),
-        )
-        for row in rows
-        if float(row["similarity_score"]) >= settings.academic_search_min_similarity
-    ]
     message = (
         "Relevant passages found."
         if matches

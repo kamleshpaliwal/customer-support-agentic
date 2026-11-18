@@ -27,6 +27,8 @@ flowchart TD
 ```text
 src/support_agents/
 ├── agents/     # supervisor, specialists, and final response agent
+├── retrieval.py  # academic search: vector/keyword candidates, fusion, rerank
+├── reranking.py  # cross-encoder reranker
 ├── db/         # PostgreSQL access, migrations, initialization, and CSV import
 ├── mcp/        # MCP server, shared client session, elicitation broker
 ├── api.py      # FastAPI app (query, resume, elicitation, ingestion routes)
@@ -108,7 +110,30 @@ curl -X POST http://127.0.0.1:5000/api/v1/academic/ingest \\
   -d '{"document_type":"book_recommendations"}'
 ```
 
-Configure `OLLAMA_EMBEDDING_MODEL`, `ACADEMIC_AGENT_OLLAMA_MODEL`, `ACADEMIC_DOCUMENT_PATH`, `ACADEMIC_BOOK_RECOMMENDATIONS_DOCUMENT_PATH`, `ACADEMIC_INGEST_API_KEY`, `ACADEMIC_SEARCH_TOP_K`, and `ACADEMIC_SEARCH_MIN_SIMILARITY` in `.env`. The configured embedding model must return 768 dimensions to match the vector column. Use the same embedding model for ingestion and queries. If the model changes, re-embed the documents and migrate the vector column before using them.
+Configure `OLLAMA_EMBEDDING_MODEL`, `ACADEMIC_AGENT_OLLAMA_MODEL`, `ACADEMIC_DOCUMENT_PATH`, `ACADEMIC_BOOK_RECOMMENDATIONS_DOCUMENT_PATH`, `ACADEMIC_INGEST_API_KEY`, `ACADEMIC_SEARCH_TOP_K`, and `ACADEMIC_SEARCH_MIN_SIMILARITY` in `.env` (hybrid search and reranking are configured below). The configured embedding model must return 768 dimensions to match the vector column. Use the same embedding model for ingestion and queries. If the model changes, re-embed the documents and migrate the vector column before using them.
+
+### Retrieval: hybrid search and reranking
+
+Academic search (`src/support_agents/retrieval.py`) runs in stages, each switchable in `.env`:
+
+1. **Candidates.** `vector` mode (default) takes the nearest chunks by embedding similarity (a bi-encoder). `hybrid` mode also runs a PostgreSQL full-text query (`content_tsv`, migration `007`) and merges the two ranked lists with reciprocal rank fusion. Both use the same standard/subject/scope filters.
+2. **Rerank (optional).** A cross-encoder reads the query and each candidate together and reorders them. It is slower, so it only sees the `ACADEMIC_CANDIDATE_POOL` best candidates (default 20).
+3. **Final cut** to `limit` passages. The `ACADEMIC_SEARCH_MIN_SIMILARITY` threshold uses the cosine score and is applied before reranking, because reranker scores are on a different scale.
+
+```bash
+ACADEMIC_RETRIEVAL_MODE=hybrid          # vector | hybrid
+ACADEMIC_RERANK_ENABLED=true            # needs: pip install -e '.[rerank]'
+ACADEMIC_RERANKER_MODEL=BAAI/bge-reranker-v2-m3
+```
+
+The reranker model downloads on first use (about 2 GB) and loads when the MCP server starts (about 11 s); each search then costs about 1 s extra for a 17-candidate pool on a laptop; if it fails, search keeps the first-stage order. Postgres full-text ranking has no inverse document frequency (unlike BM25), so common words count as much as rare ones; see the retrieval notes in `evals/README.md`.
+
+Compare strategies on the replayed eval cases (no LLM, seconds to run):
+
+```bash
+python evals/retrieval_eval.py --strategy all
+python evals/retrieval_eval.py --query "What subjects do students study in Standard 6?"
+```
 
 Copy `data/fees_seed.template.csv` to a new CSV file, fill it with the school's verified fee records, and import it:
 

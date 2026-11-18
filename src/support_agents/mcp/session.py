@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 from contextvars import ContextVar
 from functools import lru_cache
@@ -32,6 +33,8 @@ from support_agents.mcp.elicitation import get_elicitation_broker
 from support_agents.settings import PROJECT_ROOT, get_settings
 
 logger = logging.getLogger(__name__)
+
+_FORWARDED_ENV_PREFIXES = ("ACADEMIC_", "OLLAMA_")
 
 # Which browser request an elicitation prompt belongs to; set by the caller of call_tool.
 _ELICITATION_REQUEST_ID: ContextVar[str | None] = ContextVar("elicitation_request_id", default=None)
@@ -77,7 +80,16 @@ def _server_parameters() -> StdioServerParameters:
         command=sys.executable,
         args=["-m", "support_agents.mcp.server"],
         cwd=str(PROJECT_ROOT),
-        env={"DATABASE_URL": settings.database_url, "MCP_TRANSPORT": "stdio"},
+        env={
+            # Retrieval and embedding settings must reach the server even without a .env file.
+            **{
+                key: value
+                for key, value in os.environ.items()
+                if key.startswith(_FORWARDED_ENV_PREFIXES)
+            },
+            "DATABASE_URL": settings.database_url,
+            "MCP_TRANSPORT": "stdio",
+        },
     )
 
 

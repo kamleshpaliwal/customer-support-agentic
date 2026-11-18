@@ -27,6 +27,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<9", "ruff>=0.6,<1", "mypy>=1.11,<2"]
+rerank = ["sentence-transformers>=3,<6"]
 eval = ["ragas>=0.4.3,<0.5", "langchain-community>=0.3.31,<0.4"]
 
 [tool.setuptools.packages.find]

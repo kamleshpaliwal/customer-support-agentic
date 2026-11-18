@@ -77,3 +77,15 @@ Validate JSONL syntax with:
 ```bash
 python -c 'import json; from pathlib import Path; p=Path("evals/datasets/support_eval.jsonl"); rows=[json.loads(line) for line in p.read_text().splitlines() if line.strip()]; print(f"{len(rows)} labeled cases")'
 ```
+
+## Retrieval-only evaluation
+
+`python evals/retrieval_eval.py` replays the academic cases that name `expected_pages` straight against the search code, with no LLM, and reports hit@k, hit@1 and MRR. `--strategy all` compares `vector`, `hybrid`, `vector+rerank` and `hybrid+rerank`; `--query "..."` prints what each strategy returns for one question.
+
+Findings on the current 16 cases:
+
+* Vector search already scores hit@4 = 1.0 and MRR about 0.97. Book queries return a single chunk because the standard/subject filters leave one candidate, and the syllabus has only 17 chunks, so there is little for hybrid or reranking to improve.
+* Hybrid is slightly worse on one syllabus question: Postgres `ts_rank_cd` has no inverse document frequency, so "6" counts as much as "students". Adding a reranker on top recovers it, since the right chunk is in the candidate pool.
+* Reranking costs about 1 s per syllabus query on a laptop (17 candidates through `bge-reranker-v2-m3`, measured through the MCP server; vector-only is about 25 ms). The eval's per-query average looks lower only because book queries have one candidate and skip reranking. Cost grows with `ACADEMIC_CANDIDATE_POOL` and chunk length, and the server needs about 11 s at startup to load the model.
+
+A harder, larger query set is needed to show real differences between strategies.

@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     academic_ingest_api_key: str | None = None
     academic_search_top_k: int = Field(default=4, ge=1, le=10)
     academic_search_min_similarity: float = Field(default=0.30, ge=-1.0, le=1.0)
+    academic_retrieval_mode: Literal["vector", "hybrid"] = "vector"
+    academic_candidate_pool: int = Field(default=20, ge=1, le=100)
+    academic_rerank_enabled: bool = False
+    academic_reranker_model: str = "BAAI/bge-reranker-v2-m3"
     academic_agent_ollama_model: str = "qwen3:4b-instruct"
     aws_region: str = "us-east-1"
     supervisor_provider: Literal["ollama", "bedrock"] = "ollama"
