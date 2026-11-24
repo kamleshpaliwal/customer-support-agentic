@@ -25,6 +25,7 @@ from support_agents.checkpointer import close_checkpointer, create_checkpointer
 from support_agents.db.connection import create_pool
 from support_agents.db.ingest_academic_pdf import ingest_configured_pdf
 from support_agents.graph import GraphDependencies, build_support_graph
+from support_agents.guardrails import Guardrails, create_guardrails
 from support_agents.limits import (
     InMemoryRateLimiter,
     PostgresRateLimiter,
@@ -168,14 +169,30 @@ def create_app(
     auth: TokenVerifier | None = None,
     ownership: RequestOwnership | None = None,
     rate_limiter: RateLimiter | None = None,
+    guardrails: Guardrails | None = None,
 ) -> FastAPI:
     """Create the app. Graph, checkpointer and broker are built on the server's event loop.
 
-    Passing ``graph`` (and optionally ``broker``, ``auth``, ``ownership``, ``rate_limiter``)
+    Passing ``graph`` (and optionally ``broker``, ``auth``, ``ownership``, ``rate_limiter``,
+    ``guardrails``)
     skips the real wiring, for tests. Authentication is on in real wiring unless AUTH_ENABLED=false.
     """
 
     configure_langsmith_tracing()
+    active_guardrails = guardrails or create_guardrails()
+
+    async def screen_answer(response: JSONResponse, request_id: str) -> JSONResponse:
+        """Apply the output guardrail to a completed answer (clarifications pass through)."""
+        body = json.loads(response.body)
+        if body.get("status") != "completed":
+            return response
+        checked = await active_guardrails.check_output(body["answer"])
+        if not checked.allowed:
+            body["answer"] = checked.message
+            body["limitations"] = []
+        else:
+            body["answer"] = checked.text
+        return JSONResponse(body)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -414,6 +431,11 @@ def create_app(
 
         if (limited := await enforce_rate_limit(user)) is not None:
             return limited
+        screened = await active_guardrails.check_input(payload.query)
+        if not screened.allowed:
+            logger.warning("Query blocked by guardrail (%s); request_id=%s", screened.reason, request_id)
+            return _error(422, screened.message, request_id=request_id)
+        payload.query = screened.text
         if not await app.state.ownership.claim(request_id, user.id):
             return _error(404, "Request not found.", request_id=request_id)
         # With authentication on, identity comes from the verified token, never the body.
@@ -439,7 +461,7 @@ def create_app(
                 "The support request could not be processed right now.",
                 request_id=request_id,
             )
-        return _query_response(result, request_id)
+        return await screen_answer(_query_response(result, request_id), request_id)
 
     @app.post("/api/v1/query/{request_id}/resume")
     async def resume_query(
@@ -459,6 +481,11 @@ def create_app(
             return _error(400, "answer must not be blank.", request_id=request_id)
         if (limited := await enforce_rate_limit(user)) is not None:
             return limited
+        screened = await active_guardrails.check_input(payload.answer)
+        if not screened.allowed:
+            logger.warning("Answer blocked by guardrail (%s); request_id=%s", screened.reason, request_id)
+            return _error(422, screened.message, request_id=request_id)
+        payload.answer = screened.text
 
         try:
             result = await app.state.graph.ainvoke(
@@ -476,7 +503,7 @@ def create_app(
                 "please submit your question again.",
                 request_id=request_id,
             )
-        return _query_response(result, request_id)
+        return await screen_answer(_query_response(result, request_id), request_id)
 
     return app
 

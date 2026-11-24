@@ -69,6 +69,11 @@ class Settings(BaseSettings):
     final_response_provider: Literal["ollama", "bedrock"] = "ollama"
     final_response_ollama_model: str = "qwen3:4b-instruct"
     final_response_bedrock_model_id: str = "us.amazon.nova-lite-v1:0"
+    # Guardrails: the free local check is on by default in every profile. The Bedrock guardrail
+    # runs after it only when GUARDRAIL_ID is set and BEDROCK_CALLS_ENABLED=true.
+    guardrail_local_enabled: bool = True
+    guardrail_id: str | None = None
+    guardrail_version: str = "DRAFT"
     langsmith_tracing: bool = False
     langsmith_api_key: SecretStr | None = None
     langsmith_project: str = "customer-support-dev"
