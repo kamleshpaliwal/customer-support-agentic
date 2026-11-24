@@ -1,5 +1,7 @@
 # Customer Support Agent System: Implementation and Production Plan
 
+> **Current status and open items live in [`progress.md`](progress.md).** This document holds the architecture and the reasoning; update `progress.md` when work is finished.
+
 This document is the source of truth for the current architecture, implemented development capabilities, remaining work, and decisions required before production. “Implemented” means present in the current development code; it does not mean production-ready or fully verified under load.
 
 ## Agreed architecture
@@ -17,6 +19,8 @@ LangGraph owns end-to-end orchestration. MCP provides the specialist tool interf
 
 ### Implemented in the development application
 
+- Input and output guardrails: a local check in every profile, then the Bedrock guardrail when configured and opted in (`guardrails.py`). The Bedrock guardrail has not been created or tested against AWS.
+
 - FastAPI (async) API and browser UI with Finance and Academic tabs.
 - LangGraph workflow with supervisor intent detection, finance and academic routing, clarification, unsupported handling, and final response nodes.
 - Ollama model adapters for local development and Bedrock adapters for supervisor routing and final response generation.
@@ -27,7 +31,7 @@ LangGraph owns end-to-end orchestration. MCP provides the specialist tool interf
 - MCP elicitation can ask for a preferred book language. Finance board confirmation uses a LangGraph interrupt.
 - Query and ingestion request schemas, tool-result validation, selected retries/timeouts, and user-facing fallback responses.
 - Optional LangSmith configuration and a Ragas-enabled evaluation runner.
-- A labeled evaluation dataset currently contains 27 cases. The full dataset has been run with Ragas; see the baseline report below. Quality thresholds and broader dataset coverage remain open.
+- The labeled evaluation dataset contains 36 cases. The Ragas baseline covers the first 27; see the baseline report below. Quality thresholds and broader dataset coverage remain open.
 
 ### Partially implemented or not production-verified
 
@@ -39,7 +43,7 @@ LangGraph owns end-to-end orchestration. MCP provides the specialist tool interf
 - LangSmith tracing is configurable, but active tracing, redaction, dashboards, alarms, and operational runbooks have not been confirmed.
 - Retries, timeouts, and fallbacks exist in selected paths; system-wide cancellation, idempotency, repeated-tool-call protection, and failure recovery need verification.
 - Source evidence is returned internally, but the user-facing source display and citation policy need a product decision and validation.
-- No dedicated automated unit/integration/API test suite or load/soak test results have been confirmed.
+- Automated tests exist (168 unit tests and 9 Postgres integration test files, including API tests). Load and soak test results do not exist yet.
 
 ## Earlier delivery phases: reconciliation
 
